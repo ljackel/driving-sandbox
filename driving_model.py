@@ -21,7 +21,8 @@ class DrivingNet(nn.Module):
             nn.ReLU(),
             nn.Flatten()
         )
-        self.controller = nn.Linear(36 * 13 * 13, 2) # [Steering, Throttle]
+        # 128×128 → 62×62 → 29×29 spatial after two 5×5 stride-2 convs; 36 channels
+        self.controller = nn.Linear(36 * 29 * 29, 2)  # [Steering, Throttle]
 
     def forward(self, x):
         x = self.features(x)
