@@ -213,3 +213,5 @@ __marimo__/
 # Logs
 lightning_logs/
 runs/
+
+dummy_data/
