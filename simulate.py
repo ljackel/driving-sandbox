@@ -20,6 +20,20 @@ def _project_root() -> str:
     return os.path.dirname(os.path.abspath(__file__))
 
 
+def simulation_output_dir(ckpt: str) -> str:
+    """Directory for sim artifacts: the training run folder if ckpt is under runs/, else data/."""
+    root = _project_root()
+    ckpt_abs = os.path.normpath(os.path.abspath(ckpt))
+    runs_abs = os.path.normpath(os.path.abspath(os.path.join(root, cfg.RUNS_DIR)))
+    ckpt_dir = os.path.dirname(ckpt_abs)
+    try:
+        if os.path.commonpath([runs_abs, ckpt_dir]) == runs_abs:
+            return ckpt_dir
+    except ValueError:
+        pass
+    return os.path.join(root, cfg.DATA_DIR)
+
+
 def latest_checkpoint_path() -> str | None:
     """Prefer newest weights under runs/*/; fall back to data/driving_net.pt."""
     root = _project_root()
@@ -98,6 +112,35 @@ def initial_heading_road_aligned(cs, y: float) -> float:
     return float(np.arctan2(fy, fx))
 
 
+def find_start_pose_bottom(
+    world_bgr: np.ndarray,
+    dw: DrivingWorld,
+) -> tuple[float, float, float]:
+    """Place ego as close to the image bottom as valid perspective warp allows."""
+    h, _w = world_bgr.shape[:2]
+    for inset in range(0, cfg.SIM_START_MAX_INSET_PX + 1):
+        y0 = float(h - 1 - inset)
+        if y0 < 0:
+            break
+        x0 = float(dw.get_road_center(y0))
+        psi = initial_heading_road_aligned(dw.cs, y0)
+        if (
+            get_view_from_pose(
+                world_bgr,
+                x0,
+                y0,
+                psi,
+                cfg.SIM_EGO_LATERAL_OFFSET_PX,
+            )
+            is not None
+        ):
+            return x0, y0, psi
+    y0 = float(h - cfg.DATASET_MAP_MARGIN)
+    x0 = float(dw.get_road_center(y0))
+    psi = initial_heading_road_aligned(dw.cs, y0)
+    return x0, y0, psi
+
+
 def run_simulation() -> tuple[np.ndarray, list[tuple[float, float]], str, float]:
     ckpt = latest_checkpoint_path()
     if ckpt is None:
@@ -111,9 +154,7 @@ def run_simulation() -> tuple[np.ndarray, list[tuple[float, float]], str, float]
     h, w = world.shape[:2]
     px_per_m = dw.px_per_m
 
-    y0 = float(h - cfg.DATASET_MAP_MARGIN)
-    x0 = float(dw.get_road_center(y0))
-    psi = initial_heading_road_aligned(dw.cs, y0)
+    x0, y0, psi = find_start_pose_bottom(world, dw)
 
     model = DrivingNet().to(device)
     model.load_state_dict(torch.load(ckpt, map_location=device))
@@ -164,16 +205,20 @@ def main() -> None:
         cv2.circle(vis, (sx, sy), 6, (0, 255, 0), -1, cv2.LINE_AA)
         cv2.circle(vis, (ex, ey), 6, (255, 0, 0), -1, cv2.LINE_AA)
 
-    out_path = os.path.join(_project_root(), cfg.DATA_DIR, "sim_path.png")
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    cv2.imwrite(out_path, vis)
+    out_dir = simulation_output_dir(ckpt)
+    os.makedirs(out_dir, exist_ok=True)
+    out_png = os.path.join(out_dir, "sim_path.png")
+    out_csv = os.path.join(out_dir, "ego_path.csv")
+    cv2.imwrite(out_png, vis)
+    np.savetxt(out_csv, path_arr, delimiter=",", header="x,y", comments="")
     print(f"Checkpoint: {ckpt!r}")
     if len(path) > 1:
         dpx = float(np.sqrt(np.sum(np.diff(path_arr, axis=0) ** 2, axis=1)).sum())
         print(f"Poses: {len(path)}, path length ~ {dpx / px_per_m:.1f} m")
     else:
         print(f"Poses: {len(path)}")
-    print(f"Saved overlay: {out_path!r}")
+    print(f"Saved overlay: {out_png!r}")
+    print(f"Saved trajectory: {out_csv!r}")
 
     plt.figure(figsize=(10, 10))
     plt.imshow(cv2.cvtColor(vis, cv2.COLOR_BGR2RGB))

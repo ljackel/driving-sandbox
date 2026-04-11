@@ -39,7 +39,16 @@ RIGHT_LANE_OFFSET_METERS = 2.0
 # --- Dataset generation ---
 DATASET_MAP_MARGIN = 80
 TEST_Y_STEP = 10
+# Road positions sampled along y; total train images = 2 * NUM_TRAIN_FRAMES (clean + perturbed).
 NUM_TRAIN_FRAMES = 1000
+# Perturbed half: lateral ~ N(0, σ²) m along lane-right; yaw ~ N(0, σ²) rad on top of path tangent.
+TRAIN_PERTURB_LATERAL_STD_M = 0.5
+TRAIN_PERTURB_YAW_STD_DEG = 10.0
+# Steering correction (same [-1,1] scale as κ after global scaling): reduce +m lateral (right) / +rad yaw.
+TRAIN_PERTURB_RECENTER_GAIN_LAT = 0.35
+TRAIN_PERTURB_RECENTER_GAIN_YAW = 2.0
+TRAIN_PERTURB_VIEW_RETRIES = 30
+DATASET_SEED = 42
 CURVATURE_DENOM_EPS = 1e-12
 KAPPA_SCALE_EPS = 1e-9
 STEERING_CLIP_MIN = -1.0
@@ -99,6 +108,8 @@ SIM_YAW_RATE_GAIN = 2.0
 SIM_MAX_STEPS = 200_000
 # Lateral offset from centerline in pixels (+ = driver right in image coords).
 SIM_EGO_LATERAL_OFFSET_PX = 0.0
+# Start as low as possible: try y = h-1, then move up until perspective warp fits.
+SIM_START_MAX_INSET_PX = 200
 
 # --- Dummy data (generate_dummy_data.py) ---
 DUMMY_NUM_SAMPLES = 100
