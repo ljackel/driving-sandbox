@@ -34,4 +34,3 @@ optimizer = optim.Adam(model.parameters(), lr=0.001)
 criterion = nn.MSELoss()
 
 print("Model is ready for single-stream training.")
-print("This is wonderful")
