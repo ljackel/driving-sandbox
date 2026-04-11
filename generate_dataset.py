@@ -91,7 +91,7 @@ def annotate_steering_bgr(img: np.ndarray, steering: float) -> None:
     cv2.putText(img, label, (x, y), font, scale, (255, 255, 255), thick, cv2.LINE_AA)
 
 
-def generate_data():
+def generate_data(num_train=1000):
     dw = DrivingWorld()
     world = dw.image
     size = dw.size
@@ -106,19 +106,37 @@ def generate_data():
     # Margin keeps perspective source quad inside the map
     margin = 80
     records = []
-    for y in range(size - margin, margin, -10):
-        folder = "train" if y > half else "test"
-        yf = float(y)
+
+    # Training: evenly sample along the road (bottom → top) in the y > half half of the map
+    y_hi = float(size - margin)
+    y_lo = float(half + 1)
+    for i, yf in enumerate(np.linspace(y_hi, y_lo, num_train, dtype=np.float64)):
         road_x = dw.get_road_center(yf)
         dxdY = float(dw.cs(yf, nu=1))
-
         view = get_perspective_view(
-            world, y, road_x, dxdY, lateral_offset_px=right_lane_offset_px
+            world, yf, road_x, dxdY, lateral_offset_px=right_lane_offset_px
         )
         if view is None:
             continue
+        rel_path = f"train/frame_{i:04d}.jpg"
+        out = os.path.join("data", rel_path.replace("/", os.sep))
+        cv2.imwrite(out, view)
+        kappa = signed_path_curvature(dw.cs, yf)
+        records.append((rel_path, kappa))
 
-        rel_path = f"{folder}/frame_{y:04d}.jpg"
+    # Test: stepped integer rows in y <= half (same style as before)
+    for y in range(size - margin, margin, -10):
+        if y > half:
+            continue
+        yf = float(y)
+        road_x = dw.get_road_center(yf)
+        dxdY = float(dw.cs(yf, nu=1))
+        view = get_perspective_view(
+            world, yf, road_x, dxdY, lateral_offset_px=right_lane_offset_px
+        )
+        if view is None:
+            continue
+        rel_path = f"test/frame_{y:04d}.jpg"
         out = os.path.join("data", rel_path.replace("/", os.sep))
         cv2.imwrite(out, view)
         kappa = signed_path_curvature(dw.cs, yf)
@@ -148,8 +166,10 @@ def generate_data():
             cv2.imwrite(os.path.join("data", "test_labeled", base), annotated)
 
         labels_path = save_labels_csv(pd.DataFrame(rows))
+        n_train = sum(1 for p, _ in records if p.startswith("train/"))
+        n_test = sum(1 for p, _ in records if p.startswith("test/"))
         print(
-            f"Data split complete. ({len(records)} frames, labels in {labels_path!r}; "
+            f"Data split complete. ({n_train} train, {n_test} test, labels in {labels_path!r}; "
             "test previews with steering in data/test_labeled/)"
         )
     else:
