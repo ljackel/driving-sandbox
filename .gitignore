@@ -215,3 +215,4 @@ lightning_logs/
 runs/
 
 dummy_data/
+data/
