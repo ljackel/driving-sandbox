@@ -1,9 +1,11 @@
 """
 Evaluate a trained DrivingNet on the held-out test split (data/test/).
 Compare predicted steering (channel 0) to CSV ground truth.
+Writes data/test_pred/*.jpg with target (white) and prediction (yellow) overlaid.
 """
 import os
 
+import cv2
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
@@ -24,6 +26,34 @@ def _labels_csv_path() -> str:
     if have_b:
         return b
     return a
+
+
+def _put_outlined_bgr(
+    img, text, org_xy, color_bgr, scale=0.4, thick=1
+):
+    x, y = org_xy
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    for dx, dy in (
+        (-1, 0),
+        (1, 0),
+        (0, -1),
+        (0, 1),
+        (-1, -1),
+        (1, 1),
+        (-1, 1),
+        (1, -1),
+    ):
+        cv2.putText(
+            img,
+            text,
+            (x + dx, y + dy),
+            font,
+            scale,
+            (0, 0, 0),
+            thick + 1,
+            cv2.LINE_AA,
+        )
+    cv2.putText(img, text, (x, y), font, scale, color_bgr, thick, cv2.LINE_AA)
 
 
 def main():
@@ -94,6 +124,28 @@ def main():
         print(
             f"  {path:32s}  gt={gt[i]:+.4f}  pred={pred[i]:+.4f}  err={err[i]:+.4f}"
         )
+
+    out_dir = os.path.join("data", "test_pred")
+    os.makedirs(out_dir, exist_ok=True)
+    root = test_ds.root_dir
+    white_bgr = (255, 255, 255)
+    yellow_bgr = (0, 255, 255)
+    for i in range(len(pred)):
+        rel = df.iloc[i, 0]
+        src = os.path.join(root, rel.replace("/", os.sep))
+        bgr = cv2.imread(src)
+        if bgr is None:
+            continue
+        _put_outlined_bgr(
+            bgr, f"target: {gt[i]:+.4f}", (4, 14), white_bgr
+        )
+        _put_outlined_bgr(
+            bgr, f"pred:   {pred[i]:+.4f}", (4, 28), yellow_bgr
+        )
+        base = os.path.basename(rel)
+        cv2.imwrite(os.path.join(out_dir, base), bgr)
+    print()
+    print(f"Annotated test images saved to {out_dir!r} (target=white, pred=yellow).")
 
 
 if __name__ == "__main__":
