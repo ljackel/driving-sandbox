@@ -3,6 +3,8 @@ import numpy as np
 import os
 import time
 import pandas as pd
+
+import config as cfg
 from generate_world import DrivingWorld
 
 
@@ -14,7 +16,7 @@ def signed_path_curvature(cs, y: float) -> float:
     d1 = float(cs(y, nu=1))
     d2 = float(cs(y, nu=2))
     denom = (1.0 + d1 * d1) ** 1.5
-    if denom < 1e-12:
+    if denom < cfg.CURVATURE_DENOM_EPS:
         return 0.0
     return d2 / denom
 
@@ -34,20 +36,22 @@ def get_perspective_view(world_img, pos_y, pos_x, dxdY, lateral_offset_px=0.0):
 
     # Camera sits in the right lane: offset along +r (driver's right when facing forward on the map).
     near_c = np.array([pos_x, pos_y], dtype=np.float32) + r * float(lateral_offset_px)
-    far_c = near_c + np.array([fx, fy], dtype=np.float32) * 20.0
+    far_c = near_c + np.array([fx, fy], dtype=np.float32) * cfg.PERSPECTIVE_FAR_OFFSET_PX
 
-    tl = far_c - r * 10.0
-    tr = far_c + r * 10.0
-    br = near_c + r * 60.0
-    bl = near_c - r * 60.0
+    tl = far_c - r * cfg.PERSPECTIVE_FAR_HALF_WIDTH
+    tr = far_c + r * cfg.PERSPECTIVE_FAR_HALF_WIDTH
+    br = near_c + r * cfg.PERSPECTIVE_NEAR_HALF_WIDTH
+    bl = near_c - r * cfg.PERSPECTIVE_NEAR_HALF_WIDTH
     src = np.float32([tl, tr, br, bl])
 
     if (src < 0).any() or (src[:, 0] >= w).any() or (src[:, 1] >= h).any():
         return None
 
-    dst = np.float32([[0, 0], [128, 0], [128, 128], [0, 128]])
+    s = float(cfg.CAMERA_IMAGE_SIZE)
+    dst = np.float32([[0, 0], [s, 0], [s, s], [0, s]])
     m = cv2.getPerspectiveTransform(src, dst)
-    view = cv2.warpPerspective(world_img, m, (128, 128))
+    wh = cfg.CAMERA_IMAGE_SIZE
+    view = cv2.warpPerspective(world_img, m, (wh, wh))
     # Horizon (far) must appear at the top of the camera image; warp was vertically inverted.
     return cv2.flip(view, 0)
 
@@ -58,17 +62,17 @@ def save_labels_csv(df: pd.DataFrame) -> str:
     retry briefly, then fall back to data/labels_new.csv so the rest of the pipeline
     can still run.
     """
-    os.makedirs("data", exist_ok=True)
-    final_path = os.path.join("data", "labels.csv")
-    tmp_path = os.path.join("data", "labels.partial.tmp")
+    os.makedirs(cfg.DATA_DIR, exist_ok=True)
+    final_path = os.path.join(cfg.DATA_DIR, cfg.LABELS_CSV)
+    tmp_path = os.path.join(cfg.DATA_DIR, cfg.LABELS_TMP)
     df.to_csv(tmp_path, index=False)
-    for _ in range(20):
+    for _ in range(cfg.LABELS_SAVE_RETRIES):
         try:
             os.replace(tmp_path, final_path)
             return final_path
         except PermissionError:
-            time.sleep(0.15)
-    alt = os.path.join("data", "labels_new.csv")
+            time.sleep(cfg.LABELS_SAVE_RETRY_SLEEP_SEC)
+    alt = os.path.join(cfg.DATA_DIR, cfg.LABELS_CSV_ALT)
     os.replace(tmp_path, alt)
     print(
         "\nWARNING: could not replace data/labels.csv (is it open in another app?). "
@@ -81,9 +85,9 @@ def save_labels_csv(df: pd.DataFrame) -> str:
 def annotate_steering_bgr(img: np.ndarray, steering: float) -> None:
     """Draw normalized steering label on a BGR image (in-place)."""
     label = f"steering: {steering:+.4f}"
-    x, y = 4, 14
+    x, y = cfg.ANNOT_STEERING_POS
     font = cv2.FONT_HERSHEY_SIMPLEX
-    scale, thick = 0.4, 1
+    scale, thick = cfg.ANNOT_FONT_SCALE, cfg.ANNOT_FONT_THICKNESS
     for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (1, 1), (-1, 1), (1, -1)):
         cv2.putText(
             img, label, (x + dx, y + dy), font, scale, (0, 0, 0), thick + 1, cv2.LINE_AA
@@ -91,20 +95,18 @@ def annotate_steering_bgr(img: np.ndarray, steering: float) -> None:
     cv2.putText(img, label, (x, y), font, scale, (255, 255, 255), thick, cv2.LINE_AA)
 
 
-def generate_data(num_train=1000):
+def generate_data(num_train=cfg.NUM_TRAIN_FRAMES):
     dw = DrivingWorld()
     world = dw.image
     size = dw.size
     half = size // 2
 
-    os.makedirs("data/train", exist_ok=True)
-    os.makedirs("data/test", exist_ok=True)
+    os.makedirs(os.path.join(cfg.DATA_DIR, "train"), exist_ok=True)
+    os.makedirs(os.path.join(cfg.DATA_DIR, "test"), exist_ok=True)
 
-    # 4 m lanes in DrivingWorld; right-lane center is 2 m from the dashed centerline.
-    right_lane_offset_px = 2.0 * dw.px_per_m
+    right_lane_offset_px = cfg.RIGHT_LANE_OFFSET_METERS * dw.px_per_m
 
-    # Margin keeps perspective source quad inside the map
-    margin = 80
+    margin = cfg.DATASET_MAP_MARGIN
     records = []
 
     # Training: evenly sample along the road (bottom → top) in the y > half half of the map
@@ -119,13 +121,13 @@ def generate_data(num_train=1000):
         if view is None:
             continue
         rel_path = f"train/frame_{i:04d}.jpg"
-        out = os.path.join("data", rel_path.replace("/", os.sep))
+        out = os.path.join(cfg.DATA_DIR, rel_path.replace("/", os.sep))
         cv2.imwrite(out, view)
         kappa = signed_path_curvature(dw.cs, yf)
         records.append((rel_path, kappa))
 
     # Test: stepped integer rows in y <= half (same style as before)
-    for y in range(size - margin, margin, -10):
+    for y in range(size - margin, margin, -cfg.TEST_Y_STEP):
         if y > half:
             continue
         yf = float(y)
@@ -137,33 +139,35 @@ def generate_data(num_train=1000):
         if view is None:
             continue
         rel_path = f"test/frame_{y:04d}.jpg"
-        out = os.path.join("data", rel_path.replace("/", os.sep))
+        out = os.path.join(cfg.DATA_DIR, rel_path.replace("/", os.sep))
         cv2.imwrite(out, view)
         kappa = signed_path_curvature(dw.cs, yf)
         records.append((rel_path, kappa))
 
     if records:
         kappas = np.array([k for _, k in records], dtype=np.float64)
-        scale = 1.0 / max(float(np.max(np.abs(kappas))), 1e-9)
+        scale = 1.0 / max(float(np.max(np.abs(kappas))), cfg.KAPPA_SCALE_EPS)
         rows = [
             {
                 "image_path": path,
-                "steering": float(np.clip(k * scale, -1.0, 1.0)),
+                "steering": float(
+                    np.clip(k * scale, cfg.STEERING_CLIP_MIN, cfg.STEERING_CLIP_MAX)
+                ),
             }
             for path, k in records
         ]
 
-        os.makedirs("data/test_labeled", exist_ok=True)
+        os.makedirs(os.path.join(cfg.DATA_DIR, "test_labeled"), exist_ok=True)
         for row in rows:
             if not row["image_path"].startswith("test/"):
                 continue
-            src = os.path.join("data", row["image_path"].replace("/", os.sep))
+            src = os.path.join(cfg.DATA_DIR, row["image_path"].replace("/", os.sep))
             annotated = cv2.imread(src)
             if annotated is None:
                 continue
             annotate_steering_bgr(annotated, row["steering"])
             base = os.path.basename(row["image_path"])
-            cv2.imwrite(os.path.join("data", "test_labeled", base), annotated)
+            cv2.imwrite(os.path.join(cfg.DATA_DIR, "test_labeled", base), annotated)
 
         labels_path = save_labels_csv(pd.DataFrame(rows))
         n_train = sum(1 for p, _ in records if p.startswith("train/"))

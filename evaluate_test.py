@@ -11,13 +11,14 @@ import torch
 from torch.utils.data import DataLoader
 from torchvision import transforms
 
+import config as cfg
 from data_loader import DrivingDataset
 from driving_model import DrivingNet
 
 
 def _labels_csv_path() -> str:
-    a = os.path.join("data", "labels.csv")
-    b = os.path.join("data", "labels_new.csv")
+    a = os.path.join(cfg.DATA_DIR, cfg.LABELS_CSV)
+    b = os.path.join(cfg.DATA_DIR, cfg.LABELS_CSV_ALT)
     have_a, have_b = os.path.isfile(a), os.path.isfile(b)
     if have_a and have_b and os.path.getmtime(b) > os.path.getmtime(a):
         return b
@@ -58,7 +59,7 @@ def _put_outlined_bgr(
 
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    checkpoint_path = os.path.join("data", "driving_net.pt")
+    checkpoint_path = os.path.join(cfg.DATA_DIR, cfg.CHECKPOINT_FILENAME)
     if not os.path.isfile(checkpoint_path):
         raise SystemExit(
             f"Missing {checkpoint_path!r}. Run train.py first to produce weights."
@@ -66,16 +67,16 @@ def main():
 
     transform = transforms.Compose(
         [
-            transforms.Resize((128, 128)),
+            transforms.Resize((cfg.CAMERA_IMAGE_SIZE, cfg.CAMERA_IMAGE_SIZE)),
             transforms.ToTensor(),
-            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+            transforms.Normalize(cfg.NORMALIZE_MEAN, cfg.NORMALIZE_STD),
         ]
     )
 
     csv_path = _labels_csv_path()
     test_ds = DrivingDataset(
         csv_file=csv_path,
-        root_dir="data",
+        root_dir=cfg.DATA_DIR,
         transform=transform,
         path_prefix="test/",
     )
@@ -84,7 +85,7 @@ def main():
             f"No test rows in {csv_path!r}. Regenerate data with generate_dataset.py."
         )
 
-    loader = DataLoader(test_ds, batch_size=16, shuffle=False)
+    loader = DataLoader(test_ds, batch_size=cfg.BATCH_SIZE, shuffle=False)
 
     model = DrivingNet().to(device)
     model.load_state_dict(torch.load(checkpoint_path, map_location=device))
@@ -125,7 +126,7 @@ def main():
             f"  {path:32s}  gt={gt[i]:+.4f}  pred={pred[i]:+.4f}  err={err[i]:+.4f}"
         )
 
-    out_dir = os.path.join("data", "test_pred")
+    out_dir = os.path.join(cfg.DATA_DIR, "test_pred")
     os.makedirs(out_dir, exist_ok=True)
     root = test_ds.root_dir
     white_bgr = (255, 255, 255)
@@ -137,10 +138,20 @@ def main():
         if bgr is None:
             continue
         _put_outlined_bgr(
-            bgr, f"target: {gt[i]:+.4f}", (4, 14), white_bgr
+            bgr,
+            f"target: {gt[i]:+.4f}",
+            cfg.EVAL_TARGET_TEXT_POS,
+            white_bgr,
+            scale=cfg.EVAL_OUTLINED_FONT_SCALE,
+            thick=cfg.EVAL_OUTLINED_FONT_THICK,
         )
         _put_outlined_bgr(
-            bgr, f"pred:   {pred[i]:+.4f}", (4, 28), yellow_bgr
+            bgr,
+            f"pred:   {pred[i]:+.4f}",
+            cfg.EVAL_PRED_TEXT_POS,
+            yellow_bgr,
+            scale=cfg.EVAL_OUTLINED_FONT_SCALE,
+            thick=cfg.EVAL_OUTLINED_FONT_THICK,
         )
         base = os.path.basename(rel)
         cv2.imwrite(os.path.join(out_dir, base), bgr)
