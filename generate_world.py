@@ -45,5 +45,5 @@ class DrivingWorld:
 
 if __name__ == "__main__":
     world = DrivingWorld()
-    plt.imshow(world.image)
+    plt.imshow(cv2.cvtColor(world.image, cv2.COLOR_BGR2RGB))
     plt.show()

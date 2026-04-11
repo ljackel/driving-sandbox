@@ -20,7 +20,7 @@ transform = transforms.Compose([
 ])
 
 # 3. Load Dataset
-dataset = DrivingDataset(csv_file='dummy_data/labels.csv', root_dir='dummy_data/images', transform=transform)
+dataset = DrivingDataset(csv_file='data/labels.csv', root_dir='data', transform=transform)
 train_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
 # 4. Initialize Model, Loss, and Optimizer
