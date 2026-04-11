@@ -3,6 +3,7 @@ import os
 import shutil
 from datetime import datetime
 
+import cv2
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -12,6 +13,7 @@ from torchvision import transforms
 import config as cfg
 from data_loader import DrivingDataset
 from driving_model import DrivingNet
+from generate_world import DrivingWorld
 
 
 def _labels_csv_path() -> str:
@@ -157,7 +159,11 @@ with open(os.path.join(run_dir, "config_snapshot.json"), "w", encoding="utf-8") 
 
 shutil.copy2(os.path.join(_root, "config.py"), os.path.join(run_dir, "config.py"))
 
+bev_path = os.path.join(run_dir, "world_bev.png")
+cv2.imwrite(bev_path, DrivingWorld().image)
+
 print(
     f"Training complete. Weights and logs saved under {run_dir!r} "
-    f"(also copied weights to {data_checkpoint!r} for evaluate_test.py)."
+    f"(also copied weights to {data_checkpoint!r} for evaluate_test.py). "
+    f"Bird's-eye map: {bev_path!r}."
 )

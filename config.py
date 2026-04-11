@@ -19,7 +19,10 @@ WORLD_IMAGE_SIZE = 1024
 WORLD_METERS = 500.0
 SPLINE_NUM_CONTROL_POINTS = 6
 # X offsets from map center for spline control points, bottom → top along the road.
-SPLINE_X_DELTAS_BOTTOM_TO_TOP = (0, 150, -100, 50, -200, 0)
+# Length must match SPLINE_NUM_CONTROL_POINTS. Order: bottom (large y) → top (small y).
+# Gentle S: small +/− x offsets (px from map center); first value at bottom stays0 for straight start.
+# CubicSpline: dx/dy=0 at bottom (large y). Sharper example: (0, 150, -100, 50, -200, 0)
+SPLINE_X_DELTAS_BOTTOM_TO_TOP = (0, 22, -18, 14, -10, 0)
 ROAD_POLYLINE_SAMPLES = 2000
 LANE_WIDTH_METERS = 4.0
 DASH_LENGTH_METERS = 3.0
@@ -33,21 +36,30 @@ CAMERA_IMAGE_SIZE = 128
 PERSPECTIVE_FAR_OFFSET_PX = 20.0
 PERSPECTIVE_FAR_HALF_WIDTH = 10.0
 PERSPECTIVE_NEAR_HALF_WIDTH = 60.0
-# Meters from centerline to right-lane center (lane width is LANE_WIDTH_METERS).
-RIGHT_LANE_OFFSET_METERS = 2.0
+# Allow BEV source quad corners this far outside [0,w)×[0,h) before rejecting the warp.
+# Near the map edge, a small heading change can spill ~1px past the border; without this,
+# open-loop sim often stops after one step. Warp uses replicate padding for out-of-map samples.
+PERSPECTIVE_SRC_MARGIN_PX = 12.0
 
 # --- Dataset generation ---
 DATASET_MAP_MARGIN = 80
 TEST_Y_STEP = 10
-# Road positions sampled along y; total train images = 2 * NUM_TRAIN_FRAMES (clean + perturbed).
+# Samples along y on the map; train images = NUM_TRAIN_FRAMES, or 2× that if any perturbation σ > 0 below.
 NUM_TRAIN_FRAMES = 1000
-# Perturbed half: lateral ~ N(0, σ²) m along lane-right; yaw ~ N(0, σ²) rad on top of path tangent.
-TRAIN_PERTURB_LATERAL_STD_M = 0.5
-TRAIN_PERTURB_YAW_STD_DEG = 10.0
-# Steering correction (same [-1,1] scale as κ after global scaling): reduce +m lateral (right) / +rad yaw.
+# Camera lateral (m) = LANE_WIDTH_METERS × fraction: from spline (lane divider) along driver's-right
+# toward the outer edge. 0.5 = geometric center of the right lane; lower if the view hugs the outer edge.
+DATASET_RIGHT_LANE_LATERAL_FRAC = 0.45
+# Road alignment: generate_dataset uses yaw_offset_rad=0 so forward axis matches the path tangent.
+# Second half of train set (when σ > 0): extra samples with Gaussian lateral (m, along lane-right)
+# and optional yaw noise (deg). Labels use κ·scale minus recentering terms below.
+TRAIN_PERTURB_LATERAL_STD_M = 0.25
+TRAIN_PERTURB_YAW_STD_DEG = 0.0
+# Added to steering for perturbed rows: −GAIN_LAT·lat_m − GAIN_YAW·yaw_rad (same scale as κ after scaling).
 TRAIN_PERTURB_RECENTER_GAIN_LAT = 0.35
 TRAIN_PERTURB_RECENTER_GAIN_YAW = 2.0
 TRAIN_PERTURB_VIEW_RETRIES = 30
+# Companion images for perturbed train views (lat/yaw/κ on image); not listed in labels.csv.
+TRAIN_PERTURB_DEBUG_SUBDIR = "train_perturb_debug"
 DATASET_SEED = 42
 CURVATURE_DENOM_EPS = 1e-12
 KAPPA_SCALE_EPS = 1e-9
@@ -81,6 +93,7 @@ def _spatial_after_convs(
     kernel: int,
     stride: int,
 ) -> int:
+    """Side length of the feature map after ``n_layers`` conv blocks (square assumed)."""
     h = image_size
     for _ in range(n_layers):
         h = (h - kernel) // stride + 1
@@ -96,7 +109,7 @@ MODEL_OUTPUT_DIM = 2
 # --- Training (train.py) ---
 BATCH_SIZE = 16
 LEARNING_RATE = 0.001
-EPOCHS = 100
+EPOCHS = 20
 NORMALIZE_MEAN = (0.5, 0.5, 0.5)
 NORMALIZE_STD = (0.5, 0.5, 0.5)
 
@@ -106,8 +119,9 @@ SIM_DT = 0.05
 # Maps network steering [-1, 1] to heading rate (rad/s); tune for stable turns.
 SIM_YAW_RATE_GAIN = 2.0
 SIM_MAX_STEPS = 200_000
-# Lateral offset from centerline in pixels (+ = driver right in image coords).
-SIM_EGO_LATERAL_OFFSET_PX = 0.0
+# Meters from centerline toward driver's right; must match ``generate_dataset`` camera offset
+# (``LANE_WIDTH_METERS * DATASET_RIGHT_LANE_LATERAL_FRAC``). Pixels = this × ``px_per_m`` in sim.
+SIM_EGO_LATERAL_OFFSET_M = LANE_WIDTH_METERS * DATASET_RIGHT_LANE_LATERAL_FRAC
 # Start as low as possible: try y = h-1, then move up until perspective warp fits.
 SIM_START_MAX_INSET_PX = 200
 

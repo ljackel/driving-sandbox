@@ -1,7 +1,9 @@
-import cv2
-import numpy as np
+import math
 import os
 import time
+
+import cv2
+import numpy as np
 import pandas as pd
 
 import config as cfg
@@ -10,8 +12,13 @@ from generate_world import DrivingWorld
 
 def signed_path_curvature(cs, y: float) -> float:
     """
-    Curvature of the road centerline (x as a function of y) in bird's-eye pixels.
-    Positive / negative encodes turn direction; scaled later to [-1, 1].
+    Signed curvature κ of the centerline treated as ``x(y)`` in bird's-eye pixel coordinates.
+
+    Uses the standard planar formula for a graph; κ is scaled to steering labels later.
+
+    Args:
+        cs: Spline ``x(y)``.
+        y: Sample row (pixels).
     """
     d1 = float(cs(y, nu=1))
     d2 = float(cs(y, nu=2))
@@ -30,16 +37,28 @@ def get_perspective_view(
     yaw_offset_rad=0.0,
 ):
     """
-    Bird's-eye patch →128×128 forward view. Forward is decreasing y (up the image).
-    dxdY: spline derivative dx/dy at the vehicle row.
-    lateral_offset_px: distance from centerline toward the right-hand lane (see DrivingWorld lane width).
-    yaw_offset_rad: rotate camera heading CCW in image plane (rad) from path tangent.
+    Warp a forward-facing ``CAMERA_IMAGE_SIZE`` crop from the BEV ``world_img``.
+
+    Forward direction follows the path tangent (decreasing ``y`` / up the image) plus optional
+    ``yaw_offset_rad``. Lateral shift moves the viewpoint along driver's right in pixels
+    (isotropic meters-to-pixels scale).
+
+    Args:
+        world_img: Full map (BGR).
+        pos_y, pos_x: Sample point on the centerline (pixels).
+        dxdY: ``dx/dy`` of the centerline spline at ``pos_y``.
+        lateral_offset_px: Signed offset along local right, in pixels.
+        yaw_offset_rad: Extra CCW rotation (rad) applied to forward/right in the image plane.
+
+    Returns:
+        Square BGR image, or ``None`` if the perspective source quad is out of bounds.
     """
     h, w = world_img.shape[:2]
     norm = float(np.hypot(dxdY, 1.0))
     fx = -dxdY / norm
     fy = -1.0 / norm
-    rx, ry = fy, -fx
+    # Match simulate.get_view_from_pose: for f = (cos ψ, sin ψ), right is (-sin ψ, cos ψ) = (-fy, fx).
+    rx, ry = -fy, fx
     c = float(np.cos(yaw_offset_rad))
     s = float(np.sin(yaw_offset_rad))
     fx, fy = c * fx - s * fy, s * fx + c * fy
@@ -57,23 +76,41 @@ def get_perspective_view(
     bl = near_c - r * cfg.PERSPECTIVE_NEAR_HALF_WIDTH
     src = np.float32([tl, tr, br, bl])
 
-    if (src < 0).any() or (src[:, 0] >= w).any() or (src[:, 1] >= h).any():
+    mrg = float(cfg.PERSPECTIVE_SRC_MARGIN_PX)
+    if (
+        (src[:, 0] < -mrg).any()
+        or (src[:, 0] >= w + mrg).any()
+        or (src[:, 1] < -mrg).any()
+        or (src[:, 1] >= h + mrg).any()
+    ):
         return None
 
     cam_s = float(cfg.CAMERA_IMAGE_SIZE)
     dst = np.float32([[0, 0], [cam_s, 0], [cam_s, cam_s], [0, cam_s]])
     m = cv2.getPerspectiveTransform(src, dst)
     wh = cfg.CAMERA_IMAGE_SIZE
-    view = cv2.warpPerspective(world_img, m, (wh, wh))
+    view = cv2.warpPerspective(
+        world_img,
+        m,
+        (wh, wh),
+        borderMode=cv2.BORDER_REPLICATE,
+    )
     # Horizon (far) must appear at the top of the camera image; warp was vertically inverted.
     return cv2.flip(view, 0)
 
 
 def save_labels_csv(df: pd.DataFrame) -> str:
     """
-    Write labels to data/labels.csv. If the file is locked (Excel, editor preview),
-    retry briefly, then fall back to data/labels_new.csv so the rest of the pipeline
-    can still run.
+    Atomically write ``df`` to ``DATA_DIR/LABELS_CSV`` via a temp file and replace.
+
+    Retries on ``PermissionError`` (e.g. file open in Excel). If replacement still fails,
+    writes ``LABELS_CSV_ALT`` instead.
+
+    Args:
+        df: Rows with ``image_path`` and ``steering`` columns.
+
+    Returns:
+        Path to the CSV that was successfully written.
     """
     os.makedirs(cfg.DATA_DIR, exist_ok=True)
     final_path = os.path.join(cfg.DATA_DIR, cfg.LABELS_CSV)
@@ -96,7 +133,13 @@ def save_labels_csv(df: pd.DataFrame) -> str:
 
 
 def annotate_steering_bgr(img: np.ndarray, steering: float) -> None:
-    """Draw normalized steering label on a BGR image (in-place)."""
+    """
+    Draw the normalized steering value as white text with black outline (in-place).
+
+    Args:
+        img: BGR image to modify.
+        steering: Clipped steering label in ``[-1, 1]``.
+    """
     label = f"steering: {steering:+.4f}"
     x, y = cfg.ANNOT_STEERING_POS
     font = cv2.FONT_HERSHEY_SIMPLEX
@@ -108,7 +151,72 @@ def annotate_steering_bgr(img: np.ndarray, steering: float) -> None:
     cv2.putText(img, label, (x, y), font, scale, (255, 255, 255), thick, cv2.LINE_AA)
 
 
+def _put_outlined_lines_bgr(
+    img: np.ndarray,
+    lines: list[str],
+    org_xy: tuple[int, int],
+    line_step_px: int = 14,
+) -> None:
+    """Draw stacked lines of white text with black outline (in-place)."""
+    x0, y0 = org_xy
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    scale, thick = cfg.ANNOT_FONT_SCALE, cfg.ANNOT_FONT_THICKNESS
+    outline_offsets = (
+        (-1, 0),
+        (1, 0),
+        (0, -1),
+        (0, 1),
+        (-1, -1),
+        (1, 1),
+        (-1, 1),
+        (1, -1),
+    )
+    for i, label in enumerate(lines):
+        x, y = x0, y0 + i * line_step_px
+        for dx, dy in outline_offsets:
+            cv2.putText(
+                img,
+                label,
+                (x + dx, y + dy),
+                font,
+                scale,
+                (0, 0, 0),
+                thick + 1,
+                cv2.LINE_AA,
+            )
+        cv2.putText(img, label, (x, y), font, scale, (255, 255, 255), thick, cv2.LINE_AA)
+
+
+def annotate_perturb_debug_bgr(
+    img: np.ndarray,
+    lat_m: float,
+    yaw_rad: float,
+    kappa_raw: float,
+) -> None:
+    """
+    Draw sampled perturbation and raw curvature on a BGR image (in-place).
+
+    Used only for ``TRAIN_PERTURB_DEBUG_SUBDIR`` companions; not for training labels.
+    """
+    yaw_deg = math.degrees(yaw_rad)
+    lines = [
+        f"perturb lat: {lat_m:+.4f} m",
+        f"perturb yaw: {yaw_deg:+.3f} deg ({yaw_rad:+.4f} rad)",
+        f"raw kappa: {kappa_raw:+.6e}",
+    ]
+    _put_outlined_lines_bgr(img, lines, cfg.ANNOT_STEERING_POS)
+
+
 def generate_data(num_train=cfg.NUM_TRAIN_FRAMES):
+    """
+    Render train/test perspective frames, steering labels, and ``data/labels.csv``.
+
+    Training samples ``y`` in the upper half of the map; test samples the lower half on a grid.
+    Optionally duplicates the train set with lateral/yaw perturbations when configured.
+
+    Args:
+        num_train: Number of base road positions (before optional perturbed duplicate set).
+    """
     dw = DrivingWorld()
     world = dw.image
     size = dw.size
@@ -117,24 +225,29 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES):
     os.makedirs(os.path.join(cfg.DATA_DIR, "train"), exist_ok=True)
     os.makedirs(os.path.join(cfg.DATA_DIR, "test"), exist_ok=True)
 
-    right_lane_offset_px = cfg.RIGHT_LANE_OFFSET_METERS * dw.px_per_m
+    right_lane_offset_px = (
+        cfg.LANE_WIDTH_METERS * cfg.DATASET_RIGHT_LANE_LATERAL_FRAC * dw.px_per_m
+    )
 
     margin = cfg.DATASET_MAP_MARGIN
     records: list[tuple[str, float, float, float]] = []
-    rng = np.random.default_rng(cfg.DATASET_SEED)
-    yaw_std = float(np.deg2rad(cfg.TRAIN_PERTURB_YAW_STD_DEG))
 
     # Training: evenly sample along the road (bottom → top) in the y > half half of the map
     y_hi = float(size - margin)
     y_lo = float(half + 1)
     y_samples = np.linspace(y_hi, y_lo, num_train, dtype=np.float64)
 
-    # Half clean (nominal right-lane pose), half Gaussian lateral + yaw vs path tangent.
+    # Right-lane center, heading = road tangent (no lateral/yaw noise unless perturbation σ > 0).
     for i, yf in enumerate(y_samples):
         road_x = dw.get_road_center(yf)
         dxdY = float(dw.cs(yf, nu=1))
         view = get_perspective_view(
-            world, yf, road_x, dxdY, lateral_offset_px=right_lane_offset_px
+            world,
+            yf,
+            road_x,
+            dxdY,
+            lateral_offset_px=right_lane_offset_px,
+            yaw_offset_rad=0.0,
         )
         if view is None:
             continue
@@ -144,34 +257,47 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES):
         kappa = signed_path_curvature(dw.cs, yf)
         records.append((rel_path, kappa, 0.0, 0.0))
 
-    for j, yf in enumerate(y_samples):
-        road_x = dw.get_road_center(yf)
-        dxdY = float(dw.cs(yf, nu=1))
-        idx = num_train + j
-        view = None
-        lat_m = 0.0
-        yaw_rad = 0.0
-        for _ in range(cfg.TRAIN_PERTURB_VIEW_RETRIES):
-            lat_m = float(rng.normal(0.0, cfg.TRAIN_PERTURB_LATERAL_STD_M))
-            yaw_rad = float(rng.normal(0.0, yaw_std))
-            lateral_px = right_lane_offset_px + lat_m * dw.px_per_m
-            view = get_perspective_view(
-                world,
-                yf,
-                road_x,
-                dxdY,
-                lateral_offset_px=lateral_px,
-                yaw_offset_rad=yaw_rad,
-            )
-            if view is not None:
-                break
-        if view is None:
-            continue
-        rel_path = f"train/frame_{idx:04d}.jpg"
-        out = os.path.join(cfg.DATA_DIR, rel_path.replace("/", os.sep))
-        cv2.imwrite(out, view)
-        kappa = signed_path_curvature(dw.cs, yf)
-        records.append((rel_path, kappa, lat_m, yaw_rad))
+    perturb_train = (
+        cfg.TRAIN_PERTURB_LATERAL_STD_M > 0.0
+        or cfg.TRAIN_PERTURB_YAW_STD_DEG > 0.0
+    )
+    if perturb_train:
+        debug_dir = os.path.join(cfg.DATA_DIR, cfg.TRAIN_PERTURB_DEBUG_SUBDIR)
+        os.makedirs(debug_dir, exist_ok=True)
+        rng = np.random.default_rng(cfg.DATASET_SEED)
+        yaw_std = float(np.deg2rad(cfg.TRAIN_PERTURB_YAW_STD_DEG))
+        for j, yf in enumerate(y_samples):
+            road_x = dw.get_road_center(yf)
+            dxdY = float(dw.cs(yf, nu=1))
+            idx = num_train + j
+            view = None
+            lat_m = 0.0
+            yaw_rad = 0.0
+            for _ in range(cfg.TRAIN_PERTURB_VIEW_RETRIES):
+                lat_m = float(rng.normal(0.0, cfg.TRAIN_PERTURB_LATERAL_STD_M))
+                yaw_rad = float(rng.normal(0.0, yaw_std))
+                lateral_px = right_lane_offset_px + lat_m * dw.px_per_m
+                view = get_perspective_view(
+                    world,
+                    yf,
+                    road_x,
+                    dxdY,
+                    lateral_offset_px=lateral_px,
+                    yaw_offset_rad=yaw_rad,
+                )
+                if view is not None:
+                    break
+            if view is None:
+                continue
+            rel_path = f"train/frame_{idx:04d}.jpg"
+            out = os.path.join(cfg.DATA_DIR, rel_path.replace("/", os.sep))
+            cv2.imwrite(out, view)
+            kappa = signed_path_curvature(dw.cs, yf)
+            records.append((rel_path, kappa, lat_m, yaw_rad))
+            dbg = view.copy()
+            annotate_perturb_debug_bgr(dbg, lat_m, yaw_rad, kappa)
+            dbg_name = f"frame_{idx:04d}.jpg"
+            cv2.imwrite(os.path.join(debug_dir, dbg_name), dbg)
 
     # Test: stepped integer rows in y <= half (same style as before)
     for y in range(size - margin, margin, -cfg.TEST_Y_STEP):
@@ -181,7 +307,12 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES):
         road_x = dw.get_road_center(yf)
         dxdY = float(dw.cs(yf, nu=1))
         view = get_perspective_view(
-            world, yf, road_x, dxdY, lateral_offset_px=right_lane_offset_px
+            world,
+            yf,
+            road_x,
+            dxdY,
+            lateral_offset_px=right_lane_offset_px,
+            yaw_offset_rad=0.0,
         )
         if view is None:
             continue
@@ -230,9 +361,15 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES):
         labels_path = save_labels_csv(pd.DataFrame(rows))
         n_train = sum(1 for p, _, _, _ in records if p.startswith("train/"))
         n_test = sum(1 for p, _, _, _ in records if p.startswith("test/"))
+        extra = ""
+        if perturb_train:
+            extra = (
+                f"; perturbed debug overlays in "
+                f"{os.path.join(cfg.DATA_DIR, cfg.TRAIN_PERTURB_DEBUG_SUBDIR)!r}"
+            )
         print(
             f"Data split complete. ({n_train} train, {n_test} test, labels in {labels_path!r}; "
-            "test previews with steering in data/test_labeled/)"
+            f"test previews with steering in data/test_labeled/{extra})"
         )
     else:
         print("Data split complete. (0 frames)")

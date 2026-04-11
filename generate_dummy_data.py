@@ -1,3 +1,4 @@
+"""Generate random RGB crops and a matching labels CSV under ``dummy_data/`` (no functions)."""
 import os
 import pandas as pd
 import numpy as np

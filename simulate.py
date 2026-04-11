@@ -17,11 +17,16 @@ from generate_world import DrivingWorld
 
 
 def _project_root() -> str:
+    """Absolute path to the project directory containing ``simulate.py``."""
     return os.path.dirname(os.path.abspath(__file__))
 
 
 def simulation_output_dir(ckpt: str) -> str:
-    """Directory for sim artifacts: the training run folder if ckpt is under runs/, else data/."""
+    """
+    Resolve where to write ``sim_path.png`` and ``ego_path.csv``.
+
+    If ``ckpt`` lives under ``runs/<stamp>/``, returns that directory; otherwise ``data/``.
+    """
     root = _project_root()
     ckpt_abs = os.path.normpath(os.path.abspath(ckpt))
     runs_abs = os.path.normpath(os.path.abspath(os.path.join(root, cfg.RUNS_DIR)))
@@ -35,7 +40,11 @@ def simulation_output_dir(ckpt: str) -> str:
 
 
 def latest_checkpoint_path() -> str | None:
-    """Prefer newest weights under runs/*/; fall back to data/driving_net.pt."""
+    """
+    Find the newest ``driving_net.pt`` by modification time.
+
+    Scans ``runs/*/<CHECKPOINT_FILENAME>`` then compares with ``data/<CHECKPOINT_FILENAME>``.
+    """
     root = _project_root()
     runs = os.path.join(root, cfg.RUNS_DIR)
     best_path: str | None = None
@@ -67,7 +76,16 @@ def get_view_from_pose(
     lateral_offset_px: float,
 ) -> np.ndarray | None:
     """
-    Camera view with heading psi (rad), velocity direction (cos psi, sin psi) in image axes (+x right, +y down).
+    Warp a square forward-facing crop from the BEV map for pose ``(x, y)`` and heading ``psi``.
+
+    Args:
+        world_bgr: Full bird's-eye map (BGR).
+        x, y: Vehicle reference point in pixel coordinates.
+        psi: Heading (rad); velocity is ``(cos psi, sin psi)`` in image axes (+x right, +y down).
+        lateral_offset_px: Shift camera along driver's right (same convention as training).
+
+    Returns:
+        ``CAMERA_IMAGE_SIZE`` square BGR view, or ``None`` if the source quad leaves the image.
     """
     h, w = world_bgr.shape[:2]
     fx, fy = float(np.cos(psi)), float(np.sin(psi))
@@ -84,18 +102,34 @@ def get_view_from_pose(
     bl = near_c - r * float(cfg.PERSPECTIVE_NEAR_HALF_WIDTH)
     src = np.float32([tl, tr, br, bl])
 
-    if (src < 0).any() or (src[:, 0] >= w).any() or (src[:, 1] >= h).any():
+    mrg = float(cfg.PERSPECTIVE_SRC_MARGIN_PX)
+    if (
+        (src[:, 0] < -mrg).any()
+        or (src[:, 0] >= w + mrg).any()
+        or (src[:, 1] < -mrg).any()
+        or (src[:, 1] >= h + mrg).any()
+    ):
         return None
 
     s = float(cfg.CAMERA_IMAGE_SIZE)
     dst = np.float32([[0, 0], [s, 0], [s, s], [0, s]])
     m = cv2.getPerspectiveTransform(src, dst)
     wh = cfg.CAMERA_IMAGE_SIZE
-    view = cv2.warpPerspective(world_bgr, m, (wh, wh))
+    view = cv2.warpPerspective(
+        world_bgr,
+        m,
+        (wh, wh),
+        borderMode=cv2.BORDER_REPLICATE,
+    )
     return cv2.flip(view, 0)
 
 
 def preprocess_bgr_for_model(bgr: np.ndarray, device: torch.device) -> torch.Tensor:
+    """
+    Convert BGR uint8 warp output to a normalized NCHW float tensor on ``device``.
+
+    Matches training normalization (RGB channel order, ``NORMALIZE_MEAN`` / ``NORMALIZE_STD``).
+    """
     rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
     t = torch.from_numpy(rgb).permute(2, 0, 1).float() / 255.0
     for c in range(3):
@@ -104,7 +138,13 @@ def preprocess_bgr_for_model(bgr: np.ndarray, device: torch.device) -> torch.Ten
 
 
 def initial_heading_road_aligned(cs, y: float) -> float:
-    """Heading (rad) tangent to road, driving toward decreasing y (up the map)."""
+    """
+    Heading (rad) aligned with the road tangent, direction of travel toward decreasing ``y`` (up the map).
+
+    Args:
+        cs: ``scipy.interpolate.CubicSpline`` for centerline ``x(y)``.
+        y: Sample row (pixels).
+    """
     dxdy = float(cs(y, nu=1))
     norm = float(np.hypot(dxdy, 1.0))
     fx = -dxdy / norm
@@ -112,11 +152,24 @@ def initial_heading_road_aligned(cs, y: float) -> float:
     return float(np.arctan2(fy, fx))
 
 
+def _ego_lateral_offset_px(dw: DrivingWorld) -> float:
+    """Camera/ego offset from centerline (px), same convention as training."""
+    return float(cfg.SIM_EGO_LATERAL_OFFSET_M) * float(dw.px_per_m)
+
+
 def find_start_pose_bottom(
     world_bgr: np.ndarray,
     dw: DrivingWorld,
 ) -> tuple[float, float, float]:
-    """Place ego as close to the image bottom as valid perspective warp allows."""
+    """
+    Choose a start pose near the bottom row with a valid first ``get_view_from_pose``.
+
+    Tries ``y = h - 1, h - 2, ...`` up to ``SIM_START_MAX_INSET_PX``, then falls back to
+    ``h - DATASET_MAP_MARGIN``.
+
+    Returns:
+        ``(x0, y0, psi)`` in pixels and radians.
+    """
     h, _w = world_bgr.shape[:2]
     for inset in range(0, cfg.SIM_START_MAX_INSET_PX + 1):
         y0 = float(h - 1 - inset)
@@ -130,7 +183,7 @@ def find_start_pose_bottom(
                 x0,
                 y0,
                 psi,
-                cfg.SIM_EGO_LATERAL_OFFSET_PX,
+                _ego_lateral_offset_px(dw),
             )
             is not None
         ):
@@ -142,6 +195,12 @@ def find_start_pose_bottom(
 
 
 def run_simulation() -> tuple[np.ndarray, list[tuple[float, float]], str, float]:
+    """
+    Open-loop roll-out: load latest weights, integrate bicycle kinematics on the BEV map.
+
+    Returns:
+        ``world_bgr``, list of ``(x, y)`` poses, checkpoint path string, and ``px_per_m``.
+    """
     ckpt = latest_checkpoint_path()
     if ckpt is None:
         raise SystemExit(
@@ -159,18 +218,25 @@ def run_simulation() -> tuple[np.ndarray, list[tuple[float, float]], str, float]
     model = DrivingNet().to(device)
     model.load_state_dict(torch.load(ckpt, map_location=device))
     model.eval()
+    n_params = sum(int(p.numel()) for p in model.parameters())
+    cls = type(model)
+    print(
+        f"Model: {cls.__module__}.{cls.__qualname__} ({n_params:,} parameters), device={device}"
+    )
+    print(f"Weights: {os.path.abspath(ckpt)}")
 
     path: list[tuple[float, float]] = [(x0, y0)]
     x, y = x0, y0
     step_dist_px = cfg.SIM_SPEED_M_S * cfg.SIM_DT * px_per_m
 
+    lateral_px = _ego_lateral_offset_px(dw)
     for _ in range(cfg.SIM_MAX_STEPS):
         view = get_view_from_pose(
             world,
             x,
             y,
             psi,
-            cfg.SIM_EGO_LATERAL_OFFSET_PX,
+            lateral_px,
         )
         if view is None:
             break
@@ -191,6 +257,7 @@ def run_simulation() -> tuple[np.ndarray, list[tuple[float, float]], str, float]
 
 
 def main() -> None:
+    """Run simulation, save path overlay and CSV, print stats, show matplotlib figure."""
     world_bgr, path, ckpt, px_per_m = run_simulation()
     path_arr = np.array(path, dtype=np.float64)
 
@@ -211,7 +278,6 @@ def main() -> None:
     out_csv = os.path.join(out_dir, "ego_path.csv")
     cv2.imwrite(out_png, vis)
     np.savetxt(out_csv, path_arr, delimiter=",", header="x,y", comments="")
-    print(f"Checkpoint: {ckpt!r}")
     if len(path) > 1:
         dpx = float(np.sqrt(np.sum(np.diff(path_arr, axis=0) ** 2, axis=1)).sum())
         print(f"Poses: {len(path)}, path length ~ {dpx / px_per_m:.1f} m")

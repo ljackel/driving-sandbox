@@ -7,11 +7,20 @@ import config as cfg
 
 
 class DrivingWorld:
+    """Top-down raster map: spline centerline, two-lane road, and dashed marking."""
+
     def __init__(
         self,
         image_size=cfg.WORLD_IMAGE_SIZE,
         world_meters=cfg.WORLD_METERS,
     ):
+        """
+        Build the spline road and render ``self.image`` (BGR, ``image_size`` square).
+
+        Args:
+            image_size: Map resolution in pixels (width and height).
+            world_meters: Physical extent represented by one edge of the map (meters).
+        """
         self.size = image_size
         self.px_per_m = image_size / world_meters
 
@@ -22,14 +31,26 @@ class DrivingWorld:
         )
         self.x_pts = x_bottom_to_top[::-1]
 
-        self.cs = CubicSpline(self.y_pts, self.x_pts)
+        # y_pts increase downward; sim starts at large y. Clamp dx/dy=0 at bottom so the road
+        # begins straight up (constant x while moving toward smaller y).
+        self.cs = CubicSpline(
+            self.y_pts,
+            self.x_pts,
+            bc_type=("not-a-knot", (1, 0.0)),
+        )
         self.image = self.create_map()
 
     def get_road_center(self, y):
-        """Returns the X coordinate for any given Y."""
+        """
+        Return the road centerline x-coordinate (pixels) at image row ``y``.
+
+        Args:
+            y: Vertical image coordinate (pixels, origin top-left).
+        """
         return float(self.cs(y))
 
     def create_map(self):
+        """Paint grass, a thick gray polyline for pavement, and white dash segments."""
         world = np.zeros((self.size, self.size, 3), dtype=np.uint8)
         world[:] = cfg.WORLD_GREEN_BGR
 

@@ -17,6 +17,7 @@ from driving_model import DrivingNet
 
 
 def _labels_csv_path() -> str:
+    """Return ``data/labels.csv`` or ``labels_new.csv`` if the alternate file is newer."""
     a = os.path.join(cfg.DATA_DIR, cfg.LABELS_CSV)
     b = os.path.join(cfg.DATA_DIR, cfg.LABELS_CSV_ALT)
     have_a, have_b = os.path.isfile(a), os.path.isfile(b)
@@ -32,6 +33,7 @@ def _labels_csv_path() -> str:
 def _put_outlined_bgr(
     img, text, org_xy, color_bgr, scale=0.4, thick=1
 ):
+    """Draw ``text`` on ``img`` with a black outline for readability (in-place)."""
     x, y = org_xy
     font = cv2.FONT_HERSHEY_SIMPLEX
     for dx, dy in (
@@ -58,6 +60,7 @@ def _put_outlined_bgr(
 
 
 def main():
+    """Load ``data/driving_net.pt``, score the test split, write annotated images to ``data/test_pred/``."""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     checkpoint_path = os.path.join(cfg.DATA_DIR, cfg.CHECKPOINT_FILENAME)
     if not os.path.isfile(checkpoint_path):

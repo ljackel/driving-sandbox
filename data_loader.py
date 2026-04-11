@@ -5,13 +5,18 @@ import pandas as pd
 import os
 
 class DrivingDataset(Dataset):
+    """PyTorch dataset reading ``image_path`` and ``steering`` rows from a CSV."""
+
     def __init__(self, csv_file, root_dir, transform=None, path_prefix=None):
         """
+        Load labels and optionally filter by path prefix (train vs test split).
+
         Args:
-            csv_file (string): Path to the csv file with annotations (image_path, steering).
-            root_dir (string): Directory with all the images.
-            transform (callable, optional): Optional transform to be applied on a sample.
-            path_prefix (string, optional): If set, keep only rows whose image_path starts with this (e.g. "train/").
+            csv_file: Path to CSV with columns ``image_path``, ``steering``.
+            root_dir: Base directory prepended to each relative ``image_path``.
+            transform: Optional torchvision-style transform applied to PIL RGB images.
+            path_prefix: If set, keep only rows whose ``image_path`` starts with this
+                (e.g. ``'train/'`` or ``'test/'``).
         """
         df = pd.read_csv(csv_file)
         if path_prefix is not None:
@@ -23,11 +28,20 @@ class DrivingDataset(Dataset):
         self.transform = transform
 
     def __len__(self):
-        # Tells PyTorch how many total images are in your sandbox
+        """Number of rows after optional ``path_prefix`` filtering."""
         return len(self.driving_labels)
 
     def __getitem__(self, idx):
-        # 1. Get image name from the CSV
+        """
+        Load one image and steering scalar.
+
+        Args:
+            idx: Row index into the filtered dataframe.
+
+        Returns:
+            Tuple ``(image, steering)`` where ``image`` is transformed tensor and
+            ``steering`` is ``float32`` scalar tensor.
+        """
         img_name = os.path.join(self.root_dir, self.driving_labels.iloc[idx, 0])
         image = Image.open(img_name).convert('RGB')
         
