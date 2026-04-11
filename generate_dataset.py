@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
 import os
+import time
 import pandas as pd
 from generate_world import DrivingWorld
 
@@ -51,6 +52,45 @@ def get_perspective_view(world_img, pos_y, pos_x, dxdY, lateral_offset_px=0.0):
     return cv2.flip(view, 0)
 
 
+def save_labels_csv(df: pd.DataFrame) -> str:
+    """
+    Write labels to data/labels.csv. If the file is locked (Excel, editor preview),
+    retry briefly, then fall back to data/labels_new.csv so the rest of the pipeline
+    can still run.
+    """
+    os.makedirs("data", exist_ok=True)
+    final_path = os.path.join("data", "labels.csv")
+    tmp_path = os.path.join("data", "labels.partial.tmp")
+    df.to_csv(tmp_path, index=False)
+    for _ in range(20):
+        try:
+            os.replace(tmp_path, final_path)
+            return final_path
+        except PermissionError:
+            time.sleep(0.15)
+    alt = os.path.join("data", "labels_new.csv")
+    os.replace(tmp_path, alt)
+    print(
+        "\nWARNING: could not replace data/labels.csv (is it open in another app?). "
+        f"Labels written to {alt}. Close the lock, then rename it to labels.csv or "
+        "delete the old CSV and rename.\n"
+    )
+    return alt
+
+
+def annotate_steering_bgr(img: np.ndarray, steering: float) -> None:
+    """Draw normalized steering label on a BGR image (in-place)."""
+    label = f"steering: {steering:+.4f}"
+    x, y = 4, 14
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    scale, thick = 0.4, 1
+    for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (1, 1), (-1, 1), (1, -1)):
+        cv2.putText(
+            img, label, (x + dx, y + dy), font, scale, (0, 0, 0), thick + 1, cv2.LINE_AA
+        )
+    cv2.putText(img, label, (x, y), font, scale, (255, 255, 255), thick, cv2.LINE_AA)
+
+
 def generate_data():
     dw = DrivingWorld()
     world = dw.image
@@ -94,11 +134,26 @@ def generate_data():
             }
             for path, k in records
         ]
-        pd.DataFrame(rows).to_csv(
-            os.path.join("data", "labels.csv"), index=False
-        )
 
-    print(f"Data split complete. ({len(records)} frames, labels in data/labels.csv)")
+        os.makedirs("data/test_labeled", exist_ok=True)
+        for row in rows:
+            if not row["image_path"].startswith("test/"):
+                continue
+            src = os.path.join("data", row["image_path"].replace("/", os.sep))
+            annotated = cv2.imread(src)
+            if annotated is None:
+                continue
+            annotate_steering_bgr(annotated, row["steering"])
+            base = os.path.basename(row["image_path"])
+            cv2.imwrite(os.path.join("data", "test_labeled", base), annotated)
+
+        labels_path = save_labels_csv(pd.DataFrame(rows))
+        print(
+            f"Data split complete. ({len(records)} frames, labels in {labels_path!r}; "
+            "test previews with steering in data/test_labeled/)"
+        )
+    else:
+        print("Data split complete. (0 frames)")
 
 
 if __name__ == "__main__":

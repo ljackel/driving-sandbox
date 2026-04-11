@@ -1,3 +1,5 @@
+import os
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -6,11 +8,25 @@ from torchvision import transforms
 from data_loader import DrivingDataset
 from driving_model import DrivingNet
 
+
+def _labels_csv_path() -> str:
+    """Prefer data/labels.csv; if labels_new.csv is newer (e.g. CSV was locked), use it."""
+    a = os.path.join("data", "labels.csv")
+    b = os.path.join("data", "labels_new.csv")
+    have_a, have_b = os.path.isfile(a), os.path.isfile(b)
+    if have_a and have_b and os.path.getmtime(b) > os.path.getmtime(a):
+        return b
+    if have_a:
+        return a
+    if have_b:
+        return b
+    return a
+
 # 1. Configuration
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 batch_size = 16
 learning_rate = 0.001
-epochs = 5
+epochs = 50
 
 # 2. Image Preprocessing (Standard for PyTorch)
 transform = transforms.Compose([
@@ -20,7 +36,12 @@ transform = transforms.Compose([
 ])
 
 # 3. Load Dataset
-dataset = DrivingDataset(csv_file='data/labels.csv', root_dir='data', transform=transform)
+dataset = DrivingDataset(
+    csv_file=_labels_csv_path(),
+    root_dir="data",
+    transform=transform,
+    path_prefix="train/",
+)
 train_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
 # 4. Initialize Model, Loss, and Optimizer
@@ -51,4 +72,6 @@ for epoch in range(epochs):
     
     print(f"Epoch [{epoch+1}/{epochs}], Loss: {running_loss/len(train_loader):.4f}")
 
-print("Training Complete!")
+checkpoint_path = os.path.join("data", "driving_net.pt")
+torch.save(model.state_dict(), checkpoint_path)
+print(f"Training complete. Weights saved to {checkpoint_path!r}")

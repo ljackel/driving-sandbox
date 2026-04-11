@@ -5,14 +5,20 @@ import pandas as pd
 import os
 
 class DrivingDataset(Dataset):
-    def __init__(self, csv_file, root_dir, transform=None):
+    def __init__(self, csv_file, root_dir, transform=None, path_prefix=None):
         """
         Args:
             csv_file (string): Path to the csv file with annotations (image_path, steering).
             root_dir (string): Directory with all the images.
             transform (callable, optional): Optional transform to be applied on a sample.
+            path_prefix (string, optional): If set, keep only rows whose image_path starts with this (e.g. "train/").
         """
-        self.driving_labels = pd.read_csv(csv_file)
+        df = pd.read_csv(csv_file)
+        if path_prefix is not None:
+            df = df[df["image_path"].str.startswith(path_prefix)].reset_index(
+                drop=True
+            )
+        self.driving_labels = df
         self.root_dir = root_dir
         self.transform = transform
 
