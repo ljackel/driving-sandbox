@@ -5,7 +5,7 @@ import config as cfg
 
 
 class DrivingNet(nn.Module):
-    """CNN + two-layer MLP: normalized RGB crops → 2-D vector (steering uses index 0)."""
+    """CNN + MLP with two same-width hidden layers (``MODEL_FC_HIDDEN_DIM``) → 2-D output."""
 
     def __init__(self):
         super(DrivingNet, self).__init__()
@@ -26,10 +26,13 @@ class DrivingNet(nn.Module):
             nn.Flatten(),
         )
 
+        h = cfg.MODEL_FC_HIDDEN_DIM
         self.head = nn.Sequential(
-            nn.Linear(cfg.MODEL_FLATTEN_DIM, cfg.MODEL_FC_HIDDEN_DIM),
+            nn.Linear(cfg.MODEL_FLATTEN_DIM, h),
             nn.ReLU(),
-            nn.Linear(cfg.MODEL_FC_HIDDEN_DIM, cfg.MODEL_OUTPUT_DIM),
+            nn.Linear(h, h),
+            nn.ReLU(),
+            nn.Linear(h, cfg.MODEL_OUTPUT_DIM),
         )
 
     def forward(self, x):

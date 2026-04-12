@@ -1,6 +1,9 @@
 """
 Open-loop driving simulator on the bird's-eye map.
-Ego starts at the bottom, centered on the road, moves at SIM_SPEED_M_S, steering from DrivingNet.
+
+State ``(x, y, ψ)`` is integrated on the road **centerline**; the camera view matches training by
+offsetting the warp along the driver's right by ``SIM_EGO_LATERAL_OFFSET_M``. The BEV overlay draws
+that right-lane position so the trace matches where the camera sits, not the centerline.
 """
 from __future__ import annotations
 
@@ -161,6 +164,22 @@ def _ego_lateral_offset_px(dw: DrivingWorld) -> float:
     return float(cfg.SIM_EGO_LATERAL_OFFSET_M) * float(dw.px_per_m)
 
 
+def _right_lane_overlay_xy(
+    x: float,
+    y: float,
+    psi: float,
+    lateral_offset_px: float,
+) -> tuple[float, float]:
+    """
+    Map centerline reference ``(x, y)`` and heading ``psi`` to the lateral camera/ego point on the BEV.
+
+    Uses the same right vector as ``get_view_from_pose``: ``(-sin ψ, cos ψ)``.
+    """
+    rx = float(-np.sin(psi))
+    ry = float(np.cos(psi))
+    return x + rx * lateral_offset_px, y + ry * lateral_offset_px
+
+
 def find_start_pose_bottom(
     world_bgr: np.ndarray,
     dw: DrivingWorld,
@@ -198,12 +217,12 @@ def find_start_pose_bottom(
     return x0, y0, psi
 
 
-def run_simulation() -> tuple[np.ndarray, list[tuple[float, float]], str, float]:
+def run_simulation() -> tuple[np.ndarray, list[tuple[float, float, float]], str, float]:
     """
     Open-loop roll-out: load latest weights, integrate bicycle kinematics on the BEV map.
 
     Returns:
-        ``world_bgr``, list of ``(x, y)`` poses, checkpoint path string, and ``px_per_m``.
+        ``world_bgr``, list of ``(x, y, psi)`` centerline poses (rad), checkpoint path, ``px_per_m``.
     """
     ckpt = latest_checkpoint_path()
     if ckpt is None:
@@ -229,7 +248,7 @@ def run_simulation() -> tuple[np.ndarray, list[tuple[float, float]], str, float]
     )
     print(f"Weights: {os.path.abspath(ckpt)}")
 
-    path: list[tuple[float, float]] = [(x0, y0)]
+    path: list[tuple[float, float, float]] = [(x0, y0, psi)]
     x, y = x0, y0
     step_dist_px = cfg.SIM_SPEED_M_S * cfg.SIM_DT * px_per_m
 
@@ -252,7 +271,7 @@ def run_simulation() -> tuple[np.ndarray, list[tuple[float, float]], str, float]
         psi += steering * cfg.SIM_YAW_RATE_GAIN * cfg.SIM_DT
         x += step_dist_px * np.cos(psi)
         y += step_dist_px * np.sin(psi)
-        path.append((float(x), float(y)))
+        path.append((float(x), float(y), float(psi)))
 
         if x < 0 or x >= w or y < 0 or y >= h:
             break
@@ -265,25 +284,44 @@ def main() -> None:
     world_bgr, path, ckpt, px_per_m = run_simulation()
     path_arr = np.array(path, dtype=np.float64)
 
+    lateral_px = float(cfg.SIM_EGO_LATERAL_OFFSET_M) * px_per_m
     vis = world_bgr.copy()
     for i in range(len(path) - 1):
-        p0 = (int(round(path[i][0])), int(round(path[i][1])))
-        p1 = (int(round(path[i + 1][0])), int(round(path[i + 1][1])))
-        cv2.line(vis, p0, p1, (0, 0, 255), 2, cv2.LINE_AA)
+        x0, y0, p0 = path[i]
+        x1, y1, p1 = path[i + 1]
+        q0 = _right_lane_overlay_xy(x0, y0, p0, lateral_px)
+        q1 = _right_lane_overlay_xy(x1, y1, p1, lateral_px)
+        cv2.line(
+            vis,
+            (int(round(q0[0])), int(round(q0[1]))),
+            (int(round(q1[0])), int(round(q1[1]))),
+            (0, 0, 255),
+            2,
+            cv2.LINE_AA,
+        )
     if len(path) > 0:
-        sx, sy = int(round(path[0][0])), int(round(path[0][1]))
-        ex, ey = int(round(path[-1][0])), int(round(path[-1][1]))
-        cv2.circle(vis, (sx, sy), 6, (0, 255, 0), -1, cv2.LINE_AA)
-        cv2.circle(vis, (ex, ey), 6, (255, 0, 0), -1, cv2.LINE_AA)
+        x0, y0, p0 = path[0]
+        xe, ye, pe = path[-1]
+        sq = _right_lane_overlay_xy(x0, y0, p0, lateral_px)
+        eq = _right_lane_overlay_xy(xe, ye, pe, lateral_px)
+        cv2.circle(vis, (int(round(sq[0])), int(round(sq[1]))), 6, (0, 255, 0), -1, cv2.LINE_AA)
+        cv2.circle(vis, (int(round(eq[0])), int(round(eq[1]))), 6, (255, 0, 0), -1, cv2.LINE_AA)
 
     out_dir = simulation_output_dir(ckpt)
     os.makedirs(out_dir, exist_ok=True)
     out_png = os.path.join(out_dir, "sim_path.png")
     out_csv = os.path.join(out_dir, "ego_path.csv")
     cv2.imwrite(out_png, vis)
-    np.savetxt(out_csv, path_arr, delimiter=",", header="x,y", comments="")
+    np.savetxt(
+        out_csv,
+        path_arr,
+        delimiter=",",
+        header="x_center_px,y_center_px,psi_rad",
+        comments="",
+    )
     if len(path) > 1:
-        dpx = float(np.sqrt(np.sum(np.diff(path_arr, axis=0) ** 2, axis=1)).sum())
+        xy = path_arr[:, :2]
+        dpx = float(np.sqrt(np.sum(np.diff(xy, axis=0) ** 2, axis=1)).sum())
         print(f"Poses: {len(path)}, path length ~ {dpx / px_per_m:.1f} m")
     else:
         print(f"Poses: {len(path)}")

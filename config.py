@@ -46,7 +46,7 @@ DATASET_MAP_MARGIN = 80
 TEST_Y_STEP = 10
 # Samples along y on the map. Train images = NUM_TRAIN_FRAMES clean + NUM_TRAIN_FRAMES perturbed
 # when any perturbation σ > 0 below (same y grid, different lateral/yaw).
-NUM_TRAIN_FRAMES = 100
+NUM_TRAIN_FRAMES = 1000
 # Camera lateral (m) = LANE_WIDTH_METERS × fraction: from spline (lane divider) along driver's-right
 # toward the outer edge. 0.5 = geometric center of the right lane; lower if the view hugs the outer edge.
 DATASET_RIGHT_LANE_LATERAL_FRAC = 0.45
@@ -105,6 +105,7 @@ _MODEL_SPATIAL = _spatial_after_convs(
     CAMERA_IMAGE_SIZE, MODEL_NUM_CONV_BLOCKS, MODEL_KERNEL_SIZE, MODEL_STRIDE
 )
 MODEL_FLATTEN_DIM = MODEL_CONV2_CHANNELS * _MODEL_SPATIAL * _MODEL_SPATIAL
+# Width of both fully connected hidden layers after the conv stack.
 MODEL_FC_HIDDEN_DIM = 1000
 MODEL_OUTPUT_DIM = 2
 
