@@ -102,7 +102,7 @@ def main():
     with torch.no_grad():
         for images, labels in loader:
             images = images.to(device)
-            out = model(images).squeeze()
+            out = model(images)
             pred = out[:, 0].detach().cpu()
             preds.append(pred)
             gts.append(labels)

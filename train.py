@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import shutil
 from datetime import datetime
@@ -20,11 +21,17 @@ set_global_seed(cfg.TRAIN_SEED)
 from driving_model import DrivingNet
 
 _RED = "\033[31m"
+_GRN = "\033[32m"
 _RST = "\033[0m"
 
 
 def _clone_state_dict_cpu(model: nn.Module) -> dict:
     return {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+
+
+def _fmt_loss_colored(value: float, *, color: str) -> str:
+    """Format `value` with optional ANSI color (no extra label text)."""
+    return f"{color}{value:.4f}{_RST}"
 
 
 def _labels_csv_path() -> str:
@@ -98,9 +105,15 @@ os.makedirs(run_dir, exist_ok=True)
 print(f"Starting training on {device}...")
 print(f"Run artifacts directory: {run_dir!r}")
 if test_loader is not None:
-    print("Checkpoints: saving weights only when test loss improves.")
+    print(
+        f"Warmup: epochs 1..{cfg.CHECKPOINT_MIN_EPOCH - 1} skip best-test tracking; "
+        f"checkpoints when test improves (epoch >= {cfg.CHECKPOINT_MIN_EPOCH})."
+    )
 else:
-    print("Checkpoints: no test split — saving weights only when train loss improves.")
+    print(
+        f"Warmup: epochs 1..{cfg.CHECKPOINT_MIN_EPOCH - 1} skip best-train tracking; "
+        f"checkpoints when train improves (epoch >= {cfg.CHECKPOINT_MIN_EPOCH})."
+    )
 model.train()
 
 metrics = []
@@ -108,27 +121,37 @@ best_state: dict | None = None
 best_epoch: int | None = None
 best_test_loss_tracked = float("inf")
 lowest_train_loss = float("inf")
+running_min_test_loss = float("inf")
+running_min_test_epoch: int | None = None
+checkpoint_fallback_last_epoch = False
 
 for epoch in range(epochs):
-    running_loss = 0.0
+    train_sse = 0.0
+    train_n = 0
     for images, labels in train_loader:
         images, labels = images.to(device), labels.to(device)
 
-        # Forward pass
-        outputs = model(images).squeeze()
-        # Ensure labels and outputs are the same shape
-        loss = criterion(outputs[:, 0], labels)  # Only training for steering [0]
+        # Forward pass (no .squeeze(): batch size 1 would drop the batch dim and break [:, 0])
+        outputs = model(images)
+        loss = criterion(outputs[:, 0], labels)  # steering channel 0
 
-        # Backward pass (The "Learning" part)
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
 
-        running_loss += loss.item()
+        train_sse += loss.item() * labels.size(0)
+        train_n += labels.size(0)
 
-    train_loss = running_loss / len(train_loader)
+    train_loss = train_sse / train_n if train_n > 0 else 0.0
+    epoch_1based = epoch + 1
+    past_warmup = epoch_1based >= cfg.CHECKPOINT_MIN_EPOCH
     lowest_train_loss = min(lowest_train_loss, train_loss)
-    best_train_red = f"{_RED}lowest train: {lowest_train_loss:.4f}{_RST}"
+    train_loss_is_best = math.isclose(train_loss, lowest_train_loss, rel_tol=0.0, abs_tol=1e-9)
+    train_loss_str = (
+        _fmt_loss_colored(train_loss, color=_RED)
+        if train_loss_is_best and past_warmup
+        else f"{train_loss:.4f}"
+    )
 
     test_loss_val = None
     improved_checkpoint = False
@@ -139,51 +162,84 @@ for epoch in range(epochs):
         with torch.no_grad():
             for images, labels in test_loader:
                 images, labels = images.to(device), labels.to(device)
-                outputs = model(images).squeeze()
+                outputs = model(images)
                 batch_loss = criterion(outputs[:, 0], labels)
                 test_sse += batch_loss.item() * labels.size(0)
                 test_n += labels.size(0)
         test_loss_val = test_sse / test_n if test_n > 0 else 0.0
         model.train()
-        if test_loss_val < best_test_loss_tracked:
-            best_test_loss_tracked = test_loss_val
+        if test_loss_val < running_min_test_loss:
+            running_min_test_loss = test_loss_val
+            running_min_test_epoch = epoch_1based
+        test_new_best = False
+        if past_warmup:
+            prev_best_test = best_test_loss_tracked
+            test_new_best = test_loss_val < prev_best_test
+            if test_new_best:
+                best_test_loss_tracked = test_loss_val
+                best_epoch = epoch_1based
+        improved_checkpoint = test_new_best
+        if improved_checkpoint:
             best_state = _clone_state_dict_cpu(model)
-            best_epoch = epoch + 1
-            improved_checkpoint = True
+        test_loss_str = (
+            _fmt_loss_colored(test_loss_val, color=_GRN)
+            if test_new_best
+            else f"{test_loss_val:.4f}"
+        )
         print(
-            f"Epoch [{epoch+1}/{epochs}], Train Loss: {train_loss:.4f}, {best_train_red}, "
-            f"Test Loss: {test_loss_val:.4f}"
+            f"Epoch [{epoch+1}/{epochs}], Train Loss: {train_loss_str}, "
+            f"Test Loss: {test_loss_str}"
             + ("  [new best test → checkpoint]" if improved_checkpoint else "")
         )
     else:
-        if train_loss < best_test_loss_tracked:
-            best_test_loss_tracked = train_loss
+        train_new_best = False
+        if past_warmup:
+            prev_best_train = best_test_loss_tracked
+            train_new_best = train_loss < prev_best_train
+            if train_new_best:
+                best_test_loss_tracked = train_loss
+                best_epoch = epoch_1based
+        improved_checkpoint = train_new_best
+        if improved_checkpoint:
             best_state = _clone_state_dict_cpu(model)
-            best_epoch = epoch + 1
-            improved_checkpoint = True
         print(
-            f"Epoch [{epoch+1}/{epochs}], Train Loss: {train_loss:.4f}, {best_train_red}, "
+            f"Epoch [{epoch+1}/{epochs}], Train Loss: {train_loss_str}, "
             "Test Loss: n/a (no test split)"
             + ("  [new best train → checkpoint]" if improved_checkpoint else "")
         )
 
-    metrics.append(
-        {
-            "epoch": epoch + 1,
-            "train_loss": float(train_loss),
-            "test_loss": float(test_loss_val) if test_loss_val is not None else None,
-            "lowest_train_loss_so_far": float(lowest_train_loss),
-            "is_best_checkpoint": improved_checkpoint,
-        }
-    )
+    row = {
+        "epoch": epoch + 1,
+        "train_loss": float(train_loss),
+        "test_loss": float(test_loss_val) if test_loss_val is not None else None,
+        "lowest_train_loss_so_far": float(lowest_train_loss),
+        "is_best_checkpoint": improved_checkpoint,
+    }
+    if test_loader is not None:
+        row["lowest_test_loss_so_far"] = float(running_min_test_loss)
+        row["epoch_with_lowest_test_so_far"] = running_min_test_epoch
+    metrics.append(row)
 
 run_weights = os.path.join(run_dir, cfg.CHECKPOINT_FILENAME)
 data_checkpoint = os.path.join(cfg.DATA_DIR, cfg.CHECKPOINT_FILENAME)
 os.makedirs(cfg.DATA_DIR, exist_ok=True)
 if best_state is None:
-    raise RuntimeError("No checkpoint was selected (unexpected empty training loop).")
+    checkpoint_fallback_last_epoch = True
+    best_state = _clone_state_dict_cpu(model)
+    print(
+        f"Warning: no best-metric checkpoint with epoch >= {cfg.CHECKPOINT_MIN_EPOCH}; "
+        "saving last epoch weights."
+    )
 torch.save(best_state, run_weights)
 shutil.copy2(run_weights, data_checkpoint)
+
+_report_metric = float(best_test_loss_tracked)
+if (
+    test_loader is not None
+    and not math.isfinite(_report_metric)
+    and math.isfinite(running_min_test_loss)
+):
+    _report_metric = float(running_min_test_loss)
 
 training_log = {
     "started_at": _run_stamp,
@@ -194,9 +250,11 @@ training_log = {
     "batch_size": batch_size,
     "learning_rate": learning_rate,
     "train_seed": cfg.TRAIN_SEED,
+    "checkpoint_min_epoch": cfg.CHECKPOINT_MIN_EPOCH,
     "best_checkpoint_epoch": best_epoch,
-    "best_metric_at_checkpoint": float(best_test_loss_tracked),
+    "best_metric_at_checkpoint": _report_metric,
     "checkpoint_criterion": "min_test_loss" if test_loader is not None else "min_train_loss",
+    "checkpoint_fallback_last_epoch": checkpoint_fallback_last_epoch,
     "metrics": metrics,
 }
 with open(os.path.join(run_dir, "training_log.json"), "w", encoding="utf-8") as f:
@@ -211,9 +269,17 @@ bev_path = os.path.join(run_dir, "world_bev.png")
 cv2.imwrite(bev_path, DrivingWorld().image)
 
 _crit = "test" if test_loader is not None else "train"
-print(
-    f"Training complete. Best-by-{_crit} weights from epoch {best_epoch} "
-    f"(metric={best_test_loss_tracked:.4f}) saved under {run_dir!r} "
-    f"and {data_checkpoint!r} for evaluate_test.py. "
-    f"Bird's-eye map: {bev_path!r}."
-)
+if checkpoint_fallback_last_epoch:
+    print(
+        f"Training complete. Last-epoch weights (epoch {epochs}) saved under {run_dir!r} "
+        f"and {data_checkpoint!r} (no improvement with epoch >= {cfg.CHECKPOINT_MIN_EPOCH}). "
+        f"Best {_crit} metric seen: {_report_metric:.4f} at epoch {best_epoch}. "
+        f"Bird's-eye map: {bev_path!r}."
+    )
+else:
+    print(
+        f"Training complete. Best-by-{_crit} weights from epoch {best_epoch} "
+        f"(metric={_report_metric:.4f}) saved under {run_dir!r} "
+        f"and {data_checkpoint!r} for evaluate_test.py. "
+        f"Bird's-eye map: {bev_path!r}."
+    )

@@ -42,6 +42,8 @@ PERSPECTIVE_NEAR_HALF_WIDTH = 60.0
 PERSPECTIVE_SRC_MARGIN_PX = 12.0
 
 # --- Dataset generation ---
+# Train samples y in the upper map half; test samples the lower half (different road curvature mix).
+# Early test MSE can move opposite to train until the network generalizes; tune LEARNING_RATE if needed.
 DATASET_MAP_MARGIN = 80
 TEST_Y_STEP = 10
 # Samples along y on the map. Train images = NUM_TRAIN_FRAMES clean + NUM_TRAIN_FRAMES perturbed
@@ -111,10 +113,13 @@ MODEL_OUTPUT_DIM = 2
 
 # --- Training (train.py) ---
 BATCH_SIZE = 16
+# If test loss rises while train drops, try 3e-4 or 1e-4 (Adam).
 LEARNING_RATE = 0.001
 EPOCHS = 100
 # Used by ``reproducibility.set_global_seed`` and train ``DataLoader`` shuffle generator.
 TRAIN_SEED = 42
+# First 1..(N-1) epochs are warmup: no best-metric tracking, checkpoints, or best-loss coloring.
+CHECKPOINT_MIN_EPOCH = 11
 NORMALIZE_MEAN = (0.5, 0.5, 0.5)
 NORMALIZE_STD = (0.5, 0.5, 0.5)
 

@@ -266,7 +266,7 @@ def run_simulation() -> tuple[np.ndarray, list[tuple[float, float, float]], str,
 
         with torch.no_grad():
             inp = preprocess_bgr_for_model(view, device)
-            steering = float(model(inp).squeeze()[0].item())
+            steering = float(model(inp)[0, 0].item())
 
         psi += steering * cfg.SIM_YAW_RATE_GAIN * cfg.SIM_DT
         x += step_dist_px * np.cos(psi)
