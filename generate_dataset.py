@@ -254,22 +254,22 @@ def annotate_perturb_debug_bgr(
     _put_outlined_lines_bgr(img, lines, cfg.ANNOT_STEERING_POS)
 
 
-def generate_data(num_train=cfg.NUM_TRAIN_FRAMES):
+def generate_data(num_train=cfg.NUM_TRAIN_FRAMES, num_test=cfg.NUM_TEST_FRAMES):
     """
     Render train/test perspective frames, steering labels, and ``data/labels.csv``.
 
-    Training samples ``y`` in the upper half of the map; test samples the lower half on a grid.
-    Optionally duplicates the train set with lateral (and optional yaw) perturbations, plus optional
-    ``TRAIN_PERTURB_EXTRA_FRAMES`` random-``y`` lateral copies. When test lateral σ > 0, up to
-    ``TEST_PERTURB_NUM_FRAMES`` test rows get ``test/frame_{y:04d}_p.jpg``.
+    Train samples the **bottom** half of the BEV map (large ``y``); test samples the **top** half
+    (small ``y``), with no overlap at the horizontal midline. When perturbations are on, each split
+    gets one clean + one perturbed frame per sampled ``y`` (same σ and label recipe). Optional
+    ``TRAIN_PERTURB_EXTRA_FRAMES`` add random-``y`` lateral train copies.
 
     Args:
         num_train: Number of base road positions (before optional perturbed duplicate set).
+        num_test: Number of held-out road positions (clean + optional perturbed duplicate each).
     """
     dw = DrivingWorld()
     world = dw.image
     size = dw.size
-    half = size // 2
 
     os.makedirs(os.path.join(cfg.DATA_DIR, "train"), exist_ok=True)
     os.makedirs(os.path.join(cfg.DATA_DIR, "test"), exist_ok=True)
@@ -281,13 +281,23 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES):
     margin = cfg.DATASET_MAP_MARGIN
     records: list[tuple[str, float, float, float]] = []
 
-    # Training: evenly sample along the road (bottom → top) in the y > half half of the map
-    y_hi = float(size - margin)
-    y_lo = float(half + 1)
-    y_samples = np.linspace(y_hi, y_lo, num_train, dtype=np.float64)
+    # BEV y increases downward: bottom half of the map = large y; top half = small y.
+    half = size // 2
+    train_y = np.linspace(
+        float(size - margin),
+        float(half) + 1.0,
+        int(num_train),
+        dtype=np.float64,
+    )
+    test_y = np.linspace(
+        float(half),
+        float(margin),
+        int(num_test),
+        dtype=np.float64,
+    )
 
     # Right-lane center, heading = road tangent (no lateral/yaw noise unless perturbation σ > 0).
-    for i, yf in enumerate(y_samples):
+    for i, yf in enumerate(train_y):
         road_x = dw.get_road_center(yf)
         dxdY = float(dw.cs(yf, nu=1))
         view = get_perspective_view(
@@ -308,15 +318,14 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES):
         records.append((rel_path, kappa, 0.0, 0.0))
 
     perturb_train = (
-        cfg.TRAIN_PERTURB_LATERAL_STD_M > 0.0
-        or cfg.TRAIN_PERTURB_YAW_STD_DEG > 0.0
+        cfg.PERTURB_LATERAL_STD_M > 0.0 or cfg.PERTURB_YAW_STD_DEG > 0.0
     )
     if perturb_train:
         debug_dir = os.path.join(cfg.DATA_DIR, cfg.TRAIN_PERTURB_DEBUG_SUBDIR)
         os.makedirs(debug_dir, exist_ok=True)
         rng = np.random.default_rng(cfg.DATASET_SEED)
-        yaw_std = float(np.deg2rad(cfg.TRAIN_PERTURB_YAW_STD_DEG))
-        for j, yf in enumerate(y_samples):
+        yaw_std = float(np.deg2rad(cfg.PERTURB_YAW_STD_DEG))
+        for j, yf in enumerate(train_y):
             road_x = dw.get_road_center(yf)
             dxdY = float(dw.cs(yf, nu=1))
             idx = num_train + j
@@ -328,7 +337,7 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES):
                 right_lane_offset_px,
                 dw.px_per_m,
                 rng,
-                cfg.TRAIN_PERTURB_LATERAL_STD_M,
+                cfg.PERTURB_LATERAL_STD_M,
                 yaw_std,
             )
             if view is None:
@@ -348,7 +357,7 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES):
         if extra_n > 0:
             base_idx = 2 * num_train
             for k in range(extra_n):
-                yf = float(rng.choice(y_samples))
+                yf = float(rng.choice(train_y))
                 road_x = dw.get_road_center(yf)
                 dxdY = float(dw.cs(yf, nu=1))
                 idx = base_idx + k
@@ -360,7 +369,7 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES):
                     right_lane_offset_px,
                     dw.px_per_m,
                     rng,
-                    cfg.TRAIN_PERTURB_LATERAL_STD_M,
+                    cfg.PERTURB_LATERAL_STD_M,
                     yaw_std,
                 )
                 if view is None:
@@ -376,14 +385,8 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES):
                 dbg_name = f"frame_{idx:04d}.jpg"
                 cv2.imwrite(os.path.join(debug_dir, dbg_name), dbg)
 
-    # Test: stepped integer rows in y <= half — clean views, then optional perturbed duplicates.
-    test_y_rows = [
-        y
-        for y in range(size - margin, margin, -cfg.TEST_Y_STEP)
-        if y <= half
-    ]
-    for y in test_y_rows:
-        yf = float(y)
+    # Test: same y grid shape as train (clean then aligned perturbed with matching indices).
+    for i, yf in enumerate(test_y):
         road_x = dw.get_road_center(yf)
         dxdY = float(dw.cs(yf, nu=1))
         view = get_perspective_view(
@@ -396,34 +399,24 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES):
         )
         if view is None:
             continue
-        rel_path = f"test/frame_{y:04d}.jpg"
+        rel_path = f"test/frame_{i:04d}.jpg"
         out = os.path.join(cfg.DATA_DIR, rel_path.replace("/", os.sep))
         cv2.imwrite(out, view)
         kappa = signed_path_curvature(dw.cs, yf)
         records.append((rel_path, kappa, 0.0, 0.0))
 
     perturb_test = (
-        cfg.TEST_PERTURB_LATERAL_STD_M > 0.0
-        or cfg.TEST_PERTURB_YAW_STD_DEG > 0.0
+        cfg.PERTURB_LATERAL_STD_M > 0.0 or cfg.PERTURB_YAW_STD_DEG > 0.0
     )
     if perturb_test:
         rng_test = np.random.default_rng(
             cfg.DATASET_SEED + cfg.TEST_PERTURB_SEED_OFFSET
         )
-        yaw_std = float(np.deg2rad(cfg.TEST_PERTURB_YAW_STD_DEG))
-        ty_list = list(test_y_rows)
-        n_cap = int(cfg.TEST_PERTURB_NUM_FRAMES)
-        if n_cap <= 0:
-            test_y_perturb = []
-        elif len(ty_list) > n_cap:
-            pick = rng_test.choice(len(ty_list), size=n_cap, replace=False)
-            test_y_perturb = [ty_list[i] for i in sorted(pick)]
-        else:
-            test_y_perturb = ty_list
-        for y in test_y_perturb:
-            yf = float(y)
+        yaw_std = float(np.deg2rad(cfg.PERTURB_YAW_STD_DEG))
+        for j, yf in enumerate(test_y):
             road_x = dw.get_road_center(yf)
             dxdY = float(dw.cs(yf, nu=1))
+            idx = int(num_test) + j
             view, lat_m, yaw_rad = _sample_perturbed_perspective_view(
                 world,
                 yf,
@@ -432,12 +425,12 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES):
                 right_lane_offset_px,
                 dw.px_per_m,
                 rng_test,
-                cfg.TEST_PERTURB_LATERAL_STD_M,
+                cfg.PERTURB_LATERAL_STD_M,
                 yaw_std,
             )
             if view is None:
                 continue
-            rel_path = f"test/frame_{y:04d}_p.jpg"
+            rel_path = f"test/frame_{idx:04d}.jpg"
             out = os.path.join(cfg.DATA_DIR, rel_path.replace("/", os.sep))
             cv2.imwrite(out, view)
             kappa = signed_path_curvature(dw.cs, yf)
@@ -489,7 +482,10 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES):
                 f"{os.path.join(cfg.DATA_DIR, cfg.TRAIN_PERTURB_DEBUG_SUBDIR)!r}"
             )
         if perturb_test:
-            extra += "; test includes perturbed frames (frame_*_p.jpg)"
+            extra += (
+                f"; test includes perturbed frames (test/frame_{num_test:04d}.jpg through "
+                f"test/frame_{2 * num_test - 1:04d}.jpg, same sigma as train)"
+            )
         print(
             f"Data split complete. ({n_train} train, {n_test} test, labels in {labels_path!r}; "
             f"test previews with steering in data/test_labeled/{extra})"

@@ -189,7 +189,7 @@ for epoch in range(epochs):
         print(
             f"Epoch [{epoch+1}/{epochs}], Train Loss: {train_loss_str}, "
             f"Test Loss: {test_loss_str}"
-            + ("  [new best test → checkpoint]" if improved_checkpoint else "")
+            + ("  [new best test -> checkpoint]" if improved_checkpoint else "")
         )
     else:
         train_new_best = False
@@ -205,7 +205,7 @@ for epoch in range(epochs):
         print(
             f"Epoch [{epoch+1}/{epochs}], Train Loss: {train_loss_str}, "
             "Test Loss: n/a (no test split)"
-            + ("  [new best train → checkpoint]" if improved_checkpoint else "")
+            + ("  [new best train -> checkpoint]" if improved_checkpoint else "")
         )
 
     row = {

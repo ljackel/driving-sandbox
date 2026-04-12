@@ -48,34 +48,35 @@ PERSPECTIVE_NEAR_HALF_WIDTH = 14.0
 PERSPECTIVE_SRC_MARGIN_PX = 12.0
 
 # --- Dataset generation ---
-# Train samples y in the upper map half; test samples the lower half (different road curvature mix).
-# Early test MSE can move opposite to train until the network generalizes; tune LEARNING_RATE if needed.
+# BEV ``y`` increases downward. Train samples the bottom half of the map (large ``y``); test samples
+# the top half (small ``y``), disjoint so no leakage. When perturbations are on, each split gets one
+# clean + one perturbed row per sampled ``y`` (same lateral/yaw σ and label recipe); optional
+# TRAIN_PERTURB_EXTRA_FRAMES add random-y train copies.
 DATASET_MAP_MARGIN = 80
-TEST_Y_STEP = 10
-# Samples along y on the map. Train images = NUM_TRAIN_FRAMES clean + NUM_TRAIN_FRAMES lateral-perturbed
-# (same y grid) when lateral σ > 0; optional TRAIN_PERTURB_EXTRA_FRAMES add random-y lateral copies.
 NUM_TRAIN_FRAMES = 1000
+NUM_TEST_FRAMES = 100
 # Camera lateral (m) = LANE_WIDTH_METERS × fraction: from spline (lane divider) along driver's-right
 # toward the outer edge. 0.5 = geometric center of the right lane; lower if the view hugs the outer edge.
 DATASET_RIGHT_LANE_LATERAL_FRAC = 0.45
 # Road alignment: generate_dataset uses yaw_offset_rad=0 so forward axis matches the path tangent.
-# Perturbed train views: Gaussian lateral (m) along lane-right; set yaw σ to 0 for lateral-only.
+# Single Gaussian lateral (m) and yaw (deg) for all perturbed train/test views; set yaw σ to 0 for lateral-only.
 # Lateral is lat_m * (WORLD_IMAGE_SIZE / WORLD_METERS) BEV px/m (~2.05).
-TRAIN_PERTURB_LATERAL_STD_M = 2.2
-TRAIN_PERTURB_YAW_STD_DEG = 0.0
+PERTURB_LATERAL_STD_M = 2.2
+PERTURB_YAW_STD_DEG = 0.0
+# Legacy aliases (same values as PERTURB_*).
+TRAIN_PERTURB_LATERAL_STD_M = PERTURB_LATERAL_STD_M
+TRAIN_PERTURB_YAW_STD_DEG = PERTURB_YAW_STD_DEG
+TEST_PERTURB_LATERAL_STD_M = PERTURB_LATERAL_STD_M
+TEST_PERTURB_YAW_STD_DEG = PERTURB_YAW_STD_DEG
 # Added to steering for perturbed rows: −GAIN_LAT·lat_m − GAIN_YAW·yaw_rad (same scale as κ after scaling).
 TRAIN_PERTURB_RECENTER_GAIN_LAT = 0.35
 TRAIN_PERTURB_RECENTER_GAIN_YAW = 2.0
 TRAIN_PERTURB_VIEW_RETRIES = 30
-# Extra lateral-only frames (random ``y`` from the train grid); 0 = only NUM_TRAIN aligned perturbed.
+# Extra lateral-only frames (random ``y`` from the train set); 0 = only NUM_TRAIN aligned perturbed.
 TRAIN_PERTURB_EXTRA_FRAMES = 0
 # Companion images for perturbed train views (lat/yaw/κ on image); not listed in labels.csv.
 TRAIN_PERTURB_DEBUG_SUBDIR = "train_perturb_debug"
-# Test set: optional lateral perturbations (same label recipe as perturbed train).
-# Filenames ``test/frame_{y:04d}_p.jpg``; at most TEST_PERTURB_NUM_FRAMES rows (subset of test grid).
-TEST_PERTURB_LATERAL_STD_M = 1.0
-TEST_PERTURB_YAW_STD_DEG = 0.0
-TEST_PERTURB_NUM_FRAMES = 100
+# RNG stream for test perturbation draws (same σ as train; independent noise).
 TEST_PERTURB_SEED_OFFSET = 12345
 DATASET_SEED = 42
 CURVATURE_DENOM_EPS = 1e-12
@@ -127,8 +128,8 @@ MODEL_OUTPUT_DIM = 2
 
 # --- Training (train.py) ---
 BATCH_SIZE = 16
-# If test loss rises while train drops, try 3e-4 or 1e-4 (Adam).
-LEARNING_RATE = 0.001
+# Adam: 1e-3 often stalls near the mean-steering baseline on this task; 3e-4–1e-4 fits reliably.
+LEARNING_RATE = 3e-4
 EPOCHS = 20
 # Used by ``reproducibility.set_global_seed`` and train ``DataLoader`` shuffle generator.
 TRAIN_SEED = 42
