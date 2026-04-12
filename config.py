@@ -44,8 +44,9 @@ PERSPECTIVE_SRC_MARGIN_PX = 12.0
 # --- Dataset generation ---
 DATASET_MAP_MARGIN = 80
 TEST_Y_STEP = 10
-# Samples along y on the map; train images = NUM_TRAIN_FRAMES, or 2× that if any perturbation σ > 0 below.
-NUM_TRAIN_FRAMES = 1000
+# Samples along y on the map. Train images = NUM_TRAIN_FRAMES clean + NUM_TRAIN_FRAMES perturbed
+# when any perturbation σ > 0 below (same y grid, different lateral/yaw).
+NUM_TRAIN_FRAMES = 100
 # Camera lateral (m) = LANE_WIDTH_METERS × fraction: from spline (lane divider) along driver's-right
 # toward the outer edge. 0.5 = geometric center of the right lane; lower if the view hugs the outer edge.
 DATASET_RIGHT_LANE_LATERAL_FRAC = 0.45
@@ -110,7 +111,7 @@ MODEL_OUTPUT_DIM = 2
 # --- Training (train.py) ---
 BATCH_SIZE = 16
 LEARNING_RATE = 0.001
-EPOCHS = 500
+EPOCHS = 100
 # Used by ``reproducibility.set_global_seed`` and train ``DataLoader`` shuffle generator.
 TRAIN_SEED = 42
 NORMALIZE_MEAN = (0.5, 0.5, 0.5)

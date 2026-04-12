@@ -1,0 +1,4 @@
+at 100 epochs, started to cling to left land.
+trained for 500 epochs. train  loss plateaus at about.0019 while test loss plateaus at about .07
+
+added 1000 unit hidden layer. trained for 100 epochs  train loss .0047, test loss 0.12
