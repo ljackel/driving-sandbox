@@ -15,6 +15,7 @@ import numpy as np
 import torch
 
 import config as cfg
+from perspective_camera import perspective_camera_view
 from reproducibility import set_global_seed
 
 set_global_seed(cfg.TRAIN_SEED)
@@ -94,41 +95,13 @@ def get_view_from_pose(
     Returns:
         ``CAMERA_IMAGE_SIZE`` square BGR view, or ``None`` if the source quad leaves the image.
     """
-    h, w = world_bgr.shape[:2]
     fx, fy = float(np.cos(psi)), float(np.sin(psi))
     rx, ry = float(-np.sin(psi)), float(np.cos(psi))
     f = np.array([fx, fy], dtype=np.float32)
     r = np.array([rx, ry], dtype=np.float32)
 
     near_c = np.array([x, y], dtype=np.float32) + r * float(lateral_offset_px)
-    far_c = near_c + f * float(cfg.PERSPECTIVE_FAR_OFFSET_PX)
-
-    tl = far_c - r * float(cfg.PERSPECTIVE_FAR_HALF_WIDTH)
-    tr = far_c + r * float(cfg.PERSPECTIVE_FAR_HALF_WIDTH)
-    br = near_c + r * float(cfg.PERSPECTIVE_NEAR_HALF_WIDTH)
-    bl = near_c - r * float(cfg.PERSPECTIVE_NEAR_HALF_WIDTH)
-    src = np.float32([tl, tr, br, bl])
-
-    mrg = float(cfg.PERSPECTIVE_SRC_MARGIN_PX)
-    if (
-        (src[:, 0] < -mrg).any()
-        or (src[:, 0] >= w + mrg).any()
-        or (src[:, 1] < -mrg).any()
-        or (src[:, 1] >= h + mrg).any()
-    ):
-        return None
-
-    s = float(cfg.CAMERA_IMAGE_SIZE)
-    dst = np.float32([[0, 0], [s, 0], [s, s], [0, s]])
-    m = cv2.getPerspectiveTransform(src, dst)
-    wh = cfg.CAMERA_IMAGE_SIZE
-    view = cv2.warpPerspective(
-        world_bgr,
-        m,
-        (wh, wh),
-        borderMode=cv2.BORDER_REPLICATE,
-    )
-    return view
+    return perspective_camera_view(world_bgr, near_c, f, r)
 
 
 def preprocess_bgr_for_model(bgr: np.ndarray, device: torch.device) -> torch.Tensor:

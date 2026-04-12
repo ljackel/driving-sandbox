@@ -20,9 +20,9 @@ WORLD_METERS = 500.0
 SPLINE_NUM_CONTROL_POINTS = 6
 # X offsets from map center for spline control points, bottom → top along the road.
 # Length must match SPLINE_NUM_CONTROL_POINTS. Order: bottom (large y) → top (small y).
-# S-curve strength: x offsets (px from map center), bottom → top; first value 0 = straight start.
-# CubicSpline: dx/dy=0 at bottom (large y). Larger |Δ| = curvier road (stay within ~±250 px of center).
-SPLINE_X_DELTAS_BOTTOM_TO_TOP = (0, 116, -104, 84, -76, 0)
+# Debug: all zeros → straight vertical road. For an S-curve, vary interior values (first/last 0 keeps
+# ends aligned); CubicSpline: dx/dy=0 at bottom (large y). Larger |Δ| = curvier (stay within ~±250 px).
+SPLINE_X_DELTAS_BOTTOM_TO_TOP = (0, 0, 0, 0, 0, 0)
 ROAD_POLYLINE_SAMPLES = 2000
 LANE_WIDTH_METERS = 4.0
 DASH_LENGTH_METERS = 3.0
@@ -33,8 +33,10 @@ ROAD_EDGE_THICKNESS = 1
 
 # --- Camera / perspective (generate_dataset.py) ---
 CAMERA_IMAGE_SIZE = 128
-PERSPECTIVE_FAR_OFFSET_PX = 20.0
-PERSPECTIVE_FAR_HALF_WIDTH = 10.0
+# BEV distance from camera to far edge of the source quad (px). Too small → almost no depth;
+# top of the crop does not read as a horizon. ~200–300 is a typical tradeoff vs map bounds.
+PERSPECTIVE_FAR_OFFSET_PX = 240.0
+PERSPECTIVE_FAR_HALF_WIDTH = 14.0
 PERSPECTIVE_NEAR_HALF_WIDTH = 60.0
 # Allow BEV source quad corners this far outside [0,w)×[0,h) before rejecting the warp.
 # Near the map edge, a small heading change can spill ~1px past the border; without this,

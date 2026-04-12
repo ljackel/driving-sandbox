@@ -79,6 +79,14 @@ class DrivingWorld:
                 (255, 255, 255),
                 thickness=cfg.ROAD_EDGE_THICKNESS,
             )
+        # Orientation: top of image is y=0 (small y); blue stripe marks that edge for debugging.
+        cv2.line(
+            world,
+            (0, 0),
+            (self.size - 1, 0),
+            (255, 0, 0),
+            thickness=4,
+        )
         return world
 
 

@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 
 import config as cfg
+from perspective_camera import perspective_camera_view
 from reproducibility import set_global_seed
 
 set_global_seed(cfg.DATASET_SEED)
@@ -57,7 +58,6 @@ def get_perspective_view(
     Returns:
         Square BGR image, or ``None`` if the perspective source quad is out of bounds.
     """
-    h, w = world_img.shape[:2]
     norm = float(np.hypot(dxdY, 1.0))
     fx = -dxdY / norm
     fy = -1.0 / norm
@@ -72,35 +72,7 @@ def get_perspective_view(
 
     # Camera sits in the right lane: offset along +r (driver's right when facing forward on the map).
     near_c = np.array([pos_x, pos_y], dtype=np.float32) + r * float(lateral_offset_px)
-    far_c = near_c + f * cfg.PERSPECTIVE_FAR_OFFSET_PX
-
-    tl = far_c - r * float(cfg.PERSPECTIVE_FAR_HALF_WIDTH)
-    tr = far_c + r * float(cfg.PERSPECTIVE_FAR_HALF_WIDTH)
-    br = near_c + r * cfg.PERSPECTIVE_NEAR_HALF_WIDTH
-    bl = near_c - r * cfg.PERSPECTIVE_NEAR_HALF_WIDTH
-    src = np.float32([tl, tr, br, bl])
-
-    mrg = float(cfg.PERSPECTIVE_SRC_MARGIN_PX)
-    if (
-        (src[:, 0] < -mrg).any()
-        or (src[:, 0] >= w + mrg).any()
-        or (src[:, 1] < -mrg).any()
-        or (src[:, 1] >= h + mrg).any()
-    ):
-        return None
-
-    cam_s = float(cfg.CAMERA_IMAGE_SIZE)
-    dst = np.float32([[0, 0], [cam_s, 0], [cam_s, cam_s], [0, cam_s]])
-    m = cv2.getPerspectiveTransform(src, dst)
-    wh = cfg.CAMERA_IMAGE_SIZE
-    view = cv2.warpPerspective(
-        world_img,
-        m,
-        (wh, wh),
-        borderMode=cv2.BORDER_REPLICATE,
-    )
-    # Far edge (tl–tr) maps to the top row; near road fills the lower part of the image.
-    return view
+    return perspective_camera_view(world_img, near_c, f, r)
 
 
 def save_labels_csv(df: pd.DataFrame) -> str:
