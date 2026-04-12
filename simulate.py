@@ -241,6 +241,7 @@ def run_simulation() -> tuple[np.ndarray, list[tuple[float, float, float]], str,
             inp = preprocess_bgr_for_model(view, device)
             steering = float(model(inp)[0, 0].item())
 
+        # Gain matches kappa_max * speed * px_per_m (see config._compute_sim_yaw_rate_gain).
         psi += steering * cfg.SIM_YAW_RATE_GAIN * cfg.SIM_DT
         x += step_dist_px * np.cos(psi)
         y += step_dist_px * np.sin(psi)

@@ -21,8 +21,8 @@ SPLINE_NUM_CONTROL_POINTS = 6
 # X offsets from map center for spline control points, bottom → top along the road.
 # Length must match SPLINE_NUM_CONTROL_POINTS. Order: bottom (large y) → top (small y).
 # S-curve strength: x offsets (px from map center), bottom → top; first value 0 = straight start.
-# CubicSpline: dx/dy=0 at bottom (large y). Larger |Δ| = curvier road (stay within ~±65 px of center).
-SPLINE_X_DELTAS_BOTTOM_TO_TOP = (0, 29, -26, 21, -19, 0)
+# CubicSpline: dx/dy=0 at bottom (large y). Larger |Δ| = curvier road (stay within ~±130 px of center).
+SPLINE_X_DELTAS_BOTTOM_TO_TOP = (0, 58, -52, 42, -38, 0)
 ROAD_POLYLINE_SAMPLES = 2000
 LANE_WIDTH_METERS = 4.0
 DASH_LENGTH_METERS = 3.0
@@ -130,7 +130,7 @@ MODEL_OUTPUT_DIM = 2
 BATCH_SIZE = 16
 # Adam: 1e-3 often stalls near the mean-steering baseline on this task; 3e-4–1e-4 fits reliably.
 LEARNING_RATE = 3e-4
-EPOCHS = 20
+EPOCHS = 100
 # Used by ``reproducibility.set_global_seed`` and train ``DataLoader`` shuffle generator.
 TRAIN_SEED = 42
 # First 1..(N-1) epochs are warmup: no best-metric tracking, checkpoints, or best-loss coloring.
@@ -138,11 +138,54 @@ CHECKPOINT_MIN_EPOCH = 11
 NORMALIZE_MEAN = (0.5, 0.5, 0.5)
 NORMALIZE_STD = (0.5, 0.5, 0.5)
 
+
+def _compute_sim_yaw_rate_gain() -> float:
+    """
+    Match ``generate_dataset`` labels: steering is ``kappa / kappa_max`` over the same train/test
+    ``y`` grid used when building ``labels.csv``.
+
+    Step length in px is ``SIM_SPEED_M_S * SIM_DT * (WORLD_IMAGE_SIZE / WORLD_METERS)``. For small
+    steps, ``d_psi = kappa * ds``; substituting ``kappa = steering * kappa_max`` and
+    ``ds/dt = SIM_SPEED_M_S * px_per_m`` gives
+    ``SIM_YAW_RATE_GAIN = kappa_max * SIM_SPEED_M_S * px_per_m`` so that
+    ``psi += steering * SIM_YAW_RATE_GAIN * SIM_DT``.
+    """
+    import numpy as np
+
+    from generate_dataset import signed_path_curvature
+    from generate_world import DrivingWorld
+
+    dw = DrivingWorld()
+    size = dw.size
+    margin = DATASET_MAP_MARGIN
+    half = size // 2
+    train_y = np.linspace(
+        float(size - margin),
+        float(half) + 1.0,
+        int(NUM_TRAIN_FRAMES),
+        dtype=np.float64,
+    )
+    test_y = np.linspace(
+        float(half),
+        float(margin),
+        int(NUM_TEST_FRAMES),
+        dtype=np.float64,
+    )
+    kmax = 0.0
+    for yf in np.concatenate((train_y, test_y)):
+        k = abs(float(signed_path_curvature(dw.cs, float(yf))))
+        if k > kmax:
+            kmax = k
+    px_per_m = float(WORLD_IMAGE_SIZE / WORLD_METERS)
+    return float(kmax * SIM_SPEED_M_S * px_per_m)
+
+
 # --- Open-loop simulator (simulate.py) ---
 SIM_SPEED_M_S = 20.0
 SIM_DT = 0.05
-# Maps network steering [-1, 1] to heading rate (rad/s); tune for stable turns.
-SIM_YAW_RATE_GAIN = 2.0
+# Heading rate (rad/s) per unit network output; derived from κ_max and speed (see ``_compute_sim_yaw_rate_gain``).
+# Nudge upward slightly if behavioral cloning still under-steers in open loop.
+SIM_YAW_RATE_GAIN = _compute_sim_yaw_rate_gain()
 SIM_MAX_STEPS = 200_000
 # Meters from centerline toward driver's right; must match ``generate_dataset`` camera offset
 # (``LANE_WIDTH_METERS * DATASET_RIGHT_LANE_LATERAL_FRAC``). Pixels = this × ``px_per_m`` in sim.
