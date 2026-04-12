@@ -23,8 +23,8 @@ def perspective_camera_view(
     Warp a forward-facing ``CAMERA_IMAGE_SIZE`` square from the BEV map.
 
     Uses an adaptive far distance (up to ``PERSPECTIVE_FAR_OFFSET_PX``) so the source quad stays
-    in bounds. ``warpPerspective`` leaves the crop vertically inverted relative to a correct
-    forward driving view (near road should be at the bottom); ``cv2.flip(..., 0)`` fixes that.
+    in bounds. Keep ``PERSPECTIVE_FAR_HALF_WIDTH`` > ``PERSPECTIVE_NEAR_HALF_WIDTH`` so the warp
+    does not over-magnify the top of the image (otherwise the road looks wider at the horizon).
 
     Args:
         world_bgr: Full map (BGR), shape ``(h, w, 3)``.
@@ -67,5 +67,5 @@ def perspective_camera_view(
             (wh, wh),
             borderMode=cv2.BORDER_REPLICATE,
         )
-        return cv2.flip(view, 0)
+        return view
     return None

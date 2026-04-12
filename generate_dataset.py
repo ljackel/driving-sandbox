@@ -108,6 +108,17 @@ def save_labels_csv(df: pd.DataFrame) -> str:
     return alt
 
 
+def _draw_train_near_vehicle_row_debug_bgr(img: np.ndarray) -> None:
+    """
+    In-place debug: red horizontal line on the crop row nearest the vehicle.
+
+    The perspective warp maps the BEV near edge to the bottom of the square image (+y down).
+    """
+    h, w = img.shape[:2]
+    y = h - 1
+    cv2.line(img, (0, y), (w - 1, y), (0, 0, 255), thickness=2)
+
+
 def annotate_steering_bgr(img: np.ndarray, steering: float) -> None:
     """
     Draw the normalized steering value as white text with black outline (in-place).
@@ -230,6 +241,7 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES):
             continue
         rel_path = f"train/frame_{i:04d}.jpg"
         out = os.path.join(cfg.DATA_DIR, rel_path.replace("/", os.sep))
+        _draw_train_near_vehicle_row_debug_bgr(view)
         cv2.imwrite(out, view)
         kappa = signed_path_curvature(dw.cs, yf)
         records.append((rel_path, kappa, 0.0, 0.0))
@@ -268,6 +280,7 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES):
                 continue
             rel_path = f"train/frame_{idx:04d}.jpg"
             out = os.path.join(cfg.DATA_DIR, rel_path.replace("/", os.sep))
+            _draw_train_near_vehicle_row_debug_bgr(view)
             cv2.imwrite(out, view)
             kappa = signed_path_curvature(dw.cs, yf)
             records.append((rel_path, kappa, lat_m, yaw_rad))

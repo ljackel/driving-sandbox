@@ -20,9 +20,9 @@ WORLD_METERS = 500.0
 SPLINE_NUM_CONTROL_POINTS = 6
 # X offsets from map center for spline control points, bottom → top along the road.
 # Length must match SPLINE_NUM_CONTROL_POINTS. Order: bottom (large y) → top (small y).
-# Debug: all zeros → straight vertical road. For an S-curve, vary interior values (first/last 0 keeps
-# ends aligned); CubicSpline: dx/dy=0 at bottom (large y). Larger |Δ| = curvier (stay within ~±250 px).
-SPLINE_X_DELTAS_BOTTOM_TO_TOP = (0, 0, 0, 0, 0, 0)
+# S-curve strength: x offsets (px from map center), bottom → top; first value 0 = straight start.
+# CubicSpline: dx/dy=0 at bottom (large y). Larger |Δ| = curvier road (stay within ~±65 px of center).
+SPLINE_X_DELTAS_BOTTOM_TO_TOP = (0, 29, -26, 21, -19, 0)
 ROAD_POLYLINE_SAMPLES = 2000
 LANE_WIDTH_METERS = 4.0
 DASH_LENGTH_METERS = 3.0
@@ -36,8 +36,12 @@ CAMERA_IMAGE_SIZE = 128
 # BEV distance from camera to far edge of the source quad (px). Too small → almost no depth;
 # top of the crop does not read as a horizon. ~200–300 is a typical tradeoff vs map bounds.
 PERSPECTIVE_FAR_OFFSET_PX = 240.0
-PERSPECTIVE_FAR_HALF_WIDTH = 14.0
-PERSPECTIVE_NEAR_HALF_WIDTH = 60.0
+# Cross-track half-width of the BEV source quad at the far vs near edge (see ``perspective_camera``).
+# The far row must span *more* BEV pixels than the near row: a short far segment stretched to the
+# full image width over-magnifies distance (road looks wide at the top); a long near segment
+# under-magnifies the ego (road looks narrow at the bottom). So FAR_HALF_WIDTH > NEAR_HALF_WIDTH.
+PERSPECTIVE_FAR_HALF_WIDTH = 60.0
+PERSPECTIVE_NEAR_HALF_WIDTH = 14.0
 # Allow BEV source quad corners this far outside [0,w)×[0,h) before rejecting the warp.
 # Near the map edge, a small heading change can spill ~1px past the border; without this,
 # open-loop sim often stops after one step. Warp uses replicate padding for out-of-map samples.
@@ -57,8 +61,8 @@ DATASET_RIGHT_LANE_LATERAL_FRAC = 0.45
 # Road alignment: generate_dataset uses yaw_offset_rad=0 so forward axis matches the path tangent.
 # Second half of train set (when σ > 0): extra samples with Gaussian lateral (m, along lane-right)
 # and optional yaw noise (deg). Labels use κ·scale minus recentering terms below.
-TRAIN_PERTURB_LATERAL_STD_M = 0.25
-TRAIN_PERTURB_YAW_STD_DEG = 0.0
+TRAIN_PERTURB_LATERAL_STD_M = 0.5
+TRAIN_PERTURB_YAW_STD_DEG = 10.0
 # Added to steering for perturbed rows: −GAIN_LAT·lat_m − GAIN_YAW·yaw_rad (same scale as κ after scaling).
 TRAIN_PERTURB_RECENTER_GAIN_LAT = 0.35
 TRAIN_PERTURB_RECENTER_GAIN_YAW = 2.0
@@ -122,7 +126,7 @@ MODEL_OUTPUT_DIM = 2
 BATCH_SIZE = 16
 # If test loss rises while train drops, try 3e-4 or 1e-4 (Adam).
 LEARNING_RATE = 0.001
-EPOCHS = 100
+EPOCHS = 50
 # Used by ``reproducibility.set_global_seed`` and train ``DataLoader`` shuffle generator.
 TRAIN_SEED = 42
 # First 1..(N-1) epochs are warmup: no best-metric tracking, checkpoints, or best-loss coloring.
