@@ -20,9 +20,9 @@ WORLD_METERS = 500.0
 SPLINE_NUM_CONTROL_POINTS = 6
 # X offsets from map center for spline control points, bottom → top along the road.
 # Length must match SPLINE_NUM_CONTROL_POINTS. Order: bottom (large y) → top (small y).
-# Gentle S: small +/− x offsets (px from map center); first value at bottom stays0 for straight start.
-# CubicSpline: dx/dy=0 at bottom (large y). Sharper example: (0, 150, -100, 50, -200, 0)
-SPLINE_X_DELTAS_BOTTOM_TO_TOP = (0, 22, -18, 14, -10, 0)
+# S-curve strength: x offsets (px from map center), bottom → top; first value 0 = straight start.
+# CubicSpline: dx/dy=0 at bottom (large y). Larger |Δ| = curvier road (stay within ~±200 px of center).
+SPLINE_X_DELTAS_BOTTOM_TO_TOP = (0, 58, -52, 42, -38, 0)
 ROAD_POLYLINE_SAMPLES = 2000
 LANE_WIDTH_METERS = 4.0
 DASH_LENGTH_METERS = 3.0
@@ -63,6 +63,11 @@ TRAIN_PERTURB_RECENTER_GAIN_YAW = 2.0
 TRAIN_PERTURB_VIEW_RETRIES = 30
 # Companion images for perturbed train views (lat/yaw/κ on image); not listed in labels.csv.
 TRAIN_PERTURB_DEBUG_SUBDIR = "train_perturb_debug"
+# Test set: optional extra rows with Gaussian lateral/yaw (same label recipe as perturbed train).
+# Filenames ``test/frame_{y:04d}_p.jpg`` alongside clean ``test/frame_{y:04d}.jpg``.
+TEST_PERTURB_LATERAL_STD_M = 0.25
+TEST_PERTURB_YAW_STD_DEG = 0.0
+TEST_PERTURB_SEED_OFFSET = 12345
 DATASET_SEED = 42
 CURVATURE_DENOM_EPS = 1e-12
 KAPPA_SCALE_EPS = 1e-9

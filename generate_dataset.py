@@ -217,6 +217,7 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES):
 
     Training samples ``y`` in the upper half of the map; test samples the lower half on a grid.
     Optionally duplicates the train set with lateral/yaw perturbations when configured.
+    When ``TEST_PERTURB_*`` σ > 0, each test row also gets a perturbed ``test/frame_{y:04d}_p.jpg``.
 
     Args:
         num_train: Number of base road positions (before optional perturbed duplicate set).
@@ -303,10 +304,13 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES):
             dbg_name = f"frame_{idx:04d}.jpg"
             cv2.imwrite(os.path.join(debug_dir, dbg_name), dbg)
 
-    # Test: stepped integer rows in y <= half (same style as before)
-    for y in range(size - margin, margin, -cfg.TEST_Y_STEP):
-        if y > half:
-            continue
+    # Test: stepped integer rows in y <= half — clean views, then optional perturbed duplicates.
+    test_y_rows = [
+        y
+        for y in range(size - margin, margin, -cfg.TEST_Y_STEP)
+        if y <= half
+    ]
+    for y in test_y_rows:
         yf = float(y)
         road_x = dw.get_road_center(yf)
         dxdY = float(dw.cs(yf, nu=1))
@@ -325,6 +329,44 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES):
         cv2.imwrite(out, view)
         kappa = signed_path_curvature(dw.cs, yf)
         records.append((rel_path, kappa, 0.0, 0.0))
+
+    perturb_test = (
+        cfg.TEST_PERTURB_LATERAL_STD_M > 0.0
+        or cfg.TEST_PERTURB_YAW_STD_DEG > 0.0
+    )
+    if perturb_test:
+        rng_test = np.random.default_rng(
+            cfg.DATASET_SEED + cfg.TEST_PERTURB_SEED_OFFSET
+        )
+        yaw_std = float(np.deg2rad(cfg.TEST_PERTURB_YAW_STD_DEG))
+        for y in test_y_rows:
+            yf = float(y)
+            road_x = dw.get_road_center(yf)
+            dxdY = float(dw.cs(yf, nu=1))
+            view = None
+            lat_m = 0.0
+            yaw_rad = 0.0
+            for _ in range(cfg.TRAIN_PERTURB_VIEW_RETRIES):
+                lat_m = float(rng_test.normal(0.0, cfg.TEST_PERTURB_LATERAL_STD_M))
+                yaw_rad = float(rng_test.normal(0.0, yaw_std))
+                lateral_px = right_lane_offset_px + lat_m * dw.px_per_m
+                view = get_perspective_view(
+                    world,
+                    yf,
+                    road_x,
+                    dxdY,
+                    lateral_offset_px=lateral_px,
+                    yaw_offset_rad=yaw_rad,
+                )
+                if view is not None:
+                    break
+            if view is None:
+                continue
+            rel_path = f"test/frame_{y:04d}_p.jpg"
+            out = os.path.join(cfg.DATA_DIR, rel_path.replace("/", os.sep))
+            cv2.imwrite(out, view)
+            kappa = signed_path_curvature(dw.cs, yf)
+            records.append((rel_path, kappa, lat_m, yaw_rad))
 
     if records:
         kappas = np.array([k for _, k, _, _ in records], dtype=np.float64)
@@ -368,9 +410,11 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES):
         extra = ""
         if perturb_train:
             extra = (
-                f"; perturbed debug overlays in "
+                f"; perturbed train debug overlays in "
                 f"{os.path.join(cfg.DATA_DIR, cfg.TRAIN_PERTURB_DEBUG_SUBDIR)!r}"
             )
+        if perturb_test:
+            extra += "; test includes perturbed frames (frame_*_p.jpg)"
         print(
             f"Data split complete. ({n_train} train, {n_test} test, labels in {labels_path!r}; "
             f"test previews with steering in data/test_labeled/{extra})"
