@@ -7,7 +7,10 @@ import config as cfg
 
 
 class DrivingWorld:
-    """Top-down raster map: spline centerline, two-lane road, and dashed marking."""
+    """
+    Top-down raster map: cubic-spline centerline from ``SPLINE_X_DELTAS_BOTTOM_TO_TOP``, two-lane road,
+    dashed center marking. Curvature of this spline drives dataset steering labels after global scaling.
+    """
 
     def __init__(
         self,

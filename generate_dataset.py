@@ -1,3 +1,7 @@
+"""
+Render perspective crops and ``data/labels.csv``: bottom-half train, top-half test, optional
+perturbations (shared ``PERTURB_*``), global kappa scaling, and steering recentering on perturbed rows.
+"""
 import math
 import os
 import time
@@ -19,7 +23,9 @@ def signed_path_curvature(cs, y: float) -> float:
     """
     Signed curvature κ of the centerline treated as ``x(y)`` in bird's-eye pixel coordinates.
 
-    Uses the standard planar formula for a graph; κ is scaled to steering labels later.
+    Uses the standard planar formula for a graph. ``generate_data`` scales κ by ``1/max|κ|`` over
+    **all** label rows (train + test, clean + perturbed) before clipping to steering in ``[-1, 1]``,
+    then subtracts lateral/yaw recentering terms on perturbed rows.
 
     Args:
         cs: Spline ``x(y)``.
@@ -258,14 +264,21 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES, num_test=cfg.NUM_TEST_FRAMES):
     """
     Render train/test perspective frames, steering labels, and ``data/labels.csv``.
 
-    Train samples the **bottom** half of the BEV map (large ``y``); test samples the **top** half
-    (small ``y``), with no overlap at the horizontal midline. When perturbations are on, each split
-    gets one clean + one perturbed frame per sampled ``y`` (same σ and label recipe). Optional
-    ``TRAIN_PERTURB_EXTRA_FRAMES`` add random-``y`` lateral train copies.
+    **Spatial split:** train ``y`` spans the bottom BEV half (large ``y``); test ``y`` the top half
+    (small ``y``), separated at ``size // 2`` so there is no leakage.
+
+    **Train filenames:** ``train/frame_{0..num_train-1}.jpg`` (clean), then
+    ``train/frame_{num_train..2*num_train-1}.jpg`` (aligned perturbed, same ``y`` grid as clean) when
+    ``PERTURB_LATERAL_STD_M`` or ``PERTURB_YAW_STD_DEG`` > 0, then
+    ``train/frame_{2*num_train..}.jpg`` for ``TRAIN_PERTURB_EXTRA_FRAMES`` extra perturbed frames with
+    ``y`` drawn uniformly from the train grid (same Gaussian lateral/yaw and backoff as aligned).
+
+    **Test filenames:** ``test/frame_{0..num_test-1}.jpg`` (clean), then
+    ``test/frame_{num_test..2*num_test-1}.jpg`` (perturbed) when perturbations are on.
 
     Args:
-        num_train: Number of base road positions (before optional perturbed duplicate set).
-        num_test: Number of held-out road positions (clean + optional perturbed duplicate each).
+        num_train: Number of clean road samples (and of aligned perturbed mates if perturbing).
+        num_test: Number of clean test samples (and of aligned perturbed mates if perturbing).
     """
     dw = DrivingWorld()
     world = dw.image

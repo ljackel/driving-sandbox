@@ -1,9 +1,17 @@
 """
-Open-loop driving simulator on the bird's-eye map.
+Open-loop behavioral-cloning roll-out on the bird's-eye map.
 
-State ``(x, y, ψ)`` is integrated on the road **centerline**; the camera view matches training by
-offsetting the warp along the driver's right by ``SIM_EGO_LATERAL_OFFSET_M``. The BEV overlay draws
-that right-lane position so the trace matches where the camera sits, not the centerline.
+**State:** ``(x, y, ψ)`` is a centerline reference point and heading; each step warps the camera to
+the **right lane** using ``SIM_EGO_LATERAL_OFFSET_M`` (same meters as ``generate_dataset``), matching
+training geometry.
+
+**Control:** The network predicts steering from the crop; ``train.py`` supervises **output channel 0**.
+Heading updates as ``psi += steering * SIM_YAW_RATE_GAIN * SIM_DT`` where ``SIM_YAW_RATE_GAIN`` is
+set in ``config`` (from ``kappa_max * SIM_SPEED_M_S * px_per_m`` on the train/test ``y`` grid) so
+units line up with scaled-curvature labels. There is no separate tracking controller—small prediction
+errors compound (classic BC / "open loop" in the ML sense).
+
+**Visualization:** The red overlay traces the right-lane camera path, not the centerline.
 """
 from __future__ import annotations
 
@@ -192,10 +200,11 @@ def find_start_pose_bottom(
 
 def run_simulation() -> tuple[np.ndarray, list[tuple[float, float, float]], str, float]:
     """
-    Open-loop roll-out: load latest weights, integrate bicycle kinematics on the BEV map.
+    Load the newest checkpoint and roll out: crop -> ``DrivingNet`` channel 0 -> yaw rate via
+    ``SIM_YAW_RATE_GAIN`` -> integrate ``(x, y, psi)`` with step length ``SIM_SPEED_M_S * SIM_DT * px_per_m``.
 
     Returns:
-        ``world_bgr``, list of ``(x, y, psi)`` centerline poses (rad), checkpoint path, ``px_per_m``.
+        ``world_bgr``, list of **centerline** ``(x, y, psi)`` (psi in rad), checkpoint path, ``px_per_m``.
     """
     ckpt = latest_checkpoint_path()
     if ckpt is None:

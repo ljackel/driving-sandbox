@@ -1,7 +1,9 @@
 """
-Evaluate a trained DrivingNet on the held-out test split (data/test/).
-Compare predicted steering (channel 0) to CSV ground truth.
-Writes data/test_pred/*.jpg with target (white) and prediction (yellow) overlaid.
+Evaluate ``DrivingNet`` on the **test** split (``test/`` rows in ``labels.csv``).
+
+Test images come from the **top** BEV half; train from the **bottom** half (see ``generate_dataset``).
+Compare predicted **channel 0** to CSV steering. Writes ``data/test_pred/*.jpg`` with target (white)
+and prediction (yellow) overlaid.
 """
 import os
 

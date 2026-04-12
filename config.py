@@ -1,5 +1,18 @@
 """
 Central numerical (and related) hyperparameters for the driving sandbox.
+
+Summary:
+
+- **World:** S-curve from ``SPLINE_X_DELTAS_BOTTOM_TO_TOP`` (``generate_world``).
+- **Dataset:** Train = bottom BEV half (large ``y``); test = top half (small ``y``). Train =
+  ``NUM_TRAIN_FRAMES`` clean, plus that many aligned perturbed frames when ``PERTURB_*`` sigma > 0,
+  plus ``TRAIN_PERTURB_EXTRA_FRAMES`` extra perturbed frames at random train ``y``. Test =
+  ``NUM_TEST_FRAMES`` clean + that many perturbed (same ``PERTURB_*`` as train).
+- **Labels:** Steering is ``kappa / max|kappa|`` over all CSV rows, minus lateral/yaw recentering on
+  perturbed rows (``generate_dataset``).
+- **Training:** MSE on ``DrivingNet`` channel 0 only; see ``LEARNING_RATE``, ``EPOCHS``.
+- **Simulation:** ``SIM_YAW_RATE_GAIN`` from ``_compute_sim_yaw_rate_gain`` aligns ``psi += steering * gain * dt``
+  with curvature step semantics on the train/test ``y`` grid.
 """
 from __future__ import annotations
 
@@ -21,8 +34,8 @@ SPLINE_NUM_CONTROL_POINTS = 6
 # X offsets from map center for spline control points, bottom → top along the road.
 # Length must match SPLINE_NUM_CONTROL_POINTS. Order: bottom (large y) → top (small y).
 # S-curve strength: x offsets (px from map center), bottom → top; first value 0 = straight start.
-# CubicSpline: dx/dy=0 at bottom (large y). Larger |Δ| = curvier road (stay within ~±130 px of center).
-SPLINE_X_DELTAS_BOTTOM_TO_TOP = (0, 58, -52, 42, -38, 0)
+# CubicSpline: dx/dy=0 at bottom (large y). Larger |Δ| = curvier road (stay within ~±260 px of center).
+SPLINE_X_DELTAS_BOTTOM_TO_TOP = (0, 116, -104, 84, -76, 0)
 ROAD_POLYLINE_SAMPLES = 2000
 LANE_WIDTH_METERS = 4.0
 DASH_LENGTH_METERS = 3.0
@@ -48,10 +61,11 @@ PERSPECTIVE_NEAR_HALF_WIDTH = 14.0
 PERSPECTIVE_SRC_MARGIN_PX = 12.0
 
 # --- Dataset generation ---
-# BEV ``y`` increases downward. Train samples the bottom half of the map (large ``y``); test samples
-# the top half (small ``y``), disjoint so no leakage. When perturbations are on, each split gets one
-# clean + one perturbed row per sampled ``y`` (same lateral/yaw σ and label recipe); optional
-# TRAIN_PERTURB_EXTRA_FRAMES add random-y train copies.
+# BEV ``y`` increases downward. Train samples the bottom half (large ``y``); test the top half
+# (small ``y``), disjoint at the midline. With perturbations on: each split gets one clean + one
+# aligned perturbed frame per sampled ``y`` using shared ``PERTURB_LATERAL_STD_M`` /
+# ``PERTURB_YAW_STD_DEG``. ``TRAIN_PERTURB_EXTRA_FRAMES`` adds more perturbed train frames at random
+# train ``y`` (same sampling/backoff as aligned perturbed); test perturb RNG adds ``TEST_PERTURB_SEED_OFFSET``.
 DATASET_MAP_MARGIN = 80
 NUM_TRAIN_FRAMES = 1000
 NUM_TEST_FRAMES = 100
@@ -72,8 +86,9 @@ TEST_PERTURB_YAW_STD_DEG = PERTURB_YAW_STD_DEG
 TRAIN_PERTURB_RECENTER_GAIN_LAT = 0.35
 TRAIN_PERTURB_RECENTER_GAIN_YAW = 2.0
 TRAIN_PERTURB_VIEW_RETRIES = 30
-# Extra lateral-only frames (random ``y`` from the train set); 0 = only NUM_TRAIN aligned perturbed.
-TRAIN_PERTURB_EXTRA_FRAMES = 0
+# Extra perturbed frames: same Gaussian lateral/yaw and backoff as aligned perturbed; ``y`` drawn
+# uniformly at random from the train ``y`` grid (with replacement). 0 = only NUM_TRAIN aligned.
+TRAIN_PERTURB_EXTRA_FRAMES = 4000
 # Companion images for perturbed train views (lat/yaw/κ on image); not listed in labels.csv.
 TRAIN_PERTURB_DEBUG_SUBDIR = "train_perturb_debug"
 # RNG stream for test perturbation draws (same σ as train; independent noise).
@@ -124,13 +139,15 @@ _MODEL_SPATIAL = _spatial_after_convs(
 MODEL_FLATTEN_DIM = MODEL_CONV2_CHANNELS * _MODEL_SPATIAL * _MODEL_SPATIAL
 # Width of both fully connected hidden layers after the conv stack.
 MODEL_FC_HIDDEN_DIM = 1000
+# ``train.py`` / ``simulate.py`` / ``evaluate_test.py`` use **channel 0** as steering; channel 1 is unused in the loss.
 MODEL_OUTPUT_DIM = 2
 
 # --- Training (train.py) ---
 BATCH_SIZE = 16
-# Adam: 1e-3 often stalls near the mean-steering baseline on this task; 3e-4–1e-4 fits reliably.
+# Adam: ``1e-3`` often stalls near predicting mean steering; ``3e-4`` (or ``1e-4``) fits this task reliably.
 LEARNING_RATE = 3e-4
-EPOCHS = 100
+# Increase when the dataset grows (e.g. many extra perturb frames); ``CHECKPOINT_MIN_EPOCH`` delays best-metric checkpoints.
+EPOCHS = 200
 # Used by ``reproducibility.set_global_seed`` and train ``DataLoader`` shuffle generator.
 TRAIN_SEED = 42
 # First 1..(N-1) epochs are warmup: no best-metric tracking, checkpoints, or best-loss coloring.

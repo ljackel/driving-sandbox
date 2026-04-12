@@ -1,3 +1,9 @@
+"""
+Train ``DrivingNet`` on ``data/labels.csv`` (MSE on output **channel 0** vs steering targets).
+
+Uses rows with ``train/`` prefix for training and ``test/`` for validation. Checkpoints on best test
+loss after ``CHECKPOINT_MIN_EPOCH`` (or best train loss if no test rows). Hyperparameters in ``config``.
+"""
 import json
 import math
 import os
@@ -90,9 +96,9 @@ test_loader = (
     else None
 )
 
-# 4. Initialize Model, Loss, and Optimizer
+# 4. Initialize Model, Loss, and Optimizer (MSE on steering head only: outputs[:, 0])
 model = DrivingNet().to(device)
-criterion = nn.MSELoss()  # Mean Squared Error is standard for steering (regression)
+criterion = nn.MSELoss()
 optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 
 # Timestamped run directory (weights + metrics + config snapshot)

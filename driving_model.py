@@ -5,7 +5,11 @@ import config as cfg
 
 
 class DrivingNet(nn.Module):
-    """CNN + MLP with two same-width hidden layers (``MODEL_FC_HIDDEN_DIM``) → 2-D output."""
+    """
+    CNN + two hidden MLP layers (``MODEL_FC_HIDDEN_DIM``) → ``MODEL_OUTPUT_DIM`` logits.
+
+    **Steering** is **channel 0**; training and simulation use only that channel (channel 1 is unused).
+    """
 
     def __init__(self):
         super(DrivingNet, self).__init__()
@@ -43,7 +47,7 @@ class DrivingNet(nn.Module):
             x: Input images shaped ``(N, 3, H, W)`` with ``H, W`` matching ``CAMERA_IMAGE_SIZE``.
 
         Returns:
-            Tensor of shape ``(N, MODEL_OUTPUT_DIM)``.
+            Tensor of shape ``(N, MODEL_OUTPUT_DIM)``; steering for loss/sim is ``[..., 0]``.
         """
         x = self.features(x)
         return self.head(x)

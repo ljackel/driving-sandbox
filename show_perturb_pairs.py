@@ -1,8 +1,10 @@
 """
-Write side-by-side clean vs aligned-perturbed train frames plus an amplified diff panel.
+Write side-by-side **clean vs aligned-perturbed** train frames plus an amplified diff panel.
 
-Finds indices with the largest pixel difference (perturbation backoff can make some pairs nearly
-identical). Outputs go to ``data/perturb_compare/``.
+Only pairs ``frame_{i:04d}.jpg`` with ``frame_{NUM_TRAIN_FRAMES + i:04d}.jpg`` for ``i`` in
+``[0, NUM_TRAIN_FRAMES)`` are scanned (the 1:1 clean/perturbed grid). Extra frames from
+``TRAIN_PERTURB_EXTRA_FRAMES`` are not paired here. Ranks pairs by mean absolute pixel difference
+(perturbation backoff can make some pairs nearly identical). Output: ``data/perturb_compare/``.
 
 Run from project root: ``python show_perturb_pairs.py``
 """

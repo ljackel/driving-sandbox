@@ -5,7 +5,12 @@ import pandas as pd
 import os
 
 class DrivingDataset(Dataset):
-    """PyTorch dataset reading ``image_path`` and ``steering`` rows from a CSV."""
+    """
+    PyTorch dataset: ``image_path`` and ``steering`` columns from ``labels.csv``.
+
+    Steering matches ``generate_dataset`` (scaled κ with recentering on perturbed rows), clipped to
+    ``[STEERING_CLIP_MIN, STEERING_CLIP_MAX]``.
+    """
 
     def __init__(self, csv_file, root_dir, transform=None, path_prefix=None):
         """
