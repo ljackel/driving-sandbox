@@ -99,8 +99,8 @@ def get_perspective_view(
         (wh, wh),
         borderMode=cv2.BORDER_REPLICATE,
     )
-    # Horizon (far) must appear at the top of the camera image; warp was vertically inverted.
-    return cv2.flip(view, 0)
+    # Far edge (tl–tr) maps to the top row; near road fills the lower part of the image.
+    return view
 
 
 def save_labels_csv(df: pd.DataFrame) -> str:

@@ -128,7 +128,7 @@ def get_view_from_pose(
         (wh, wh),
         borderMode=cv2.BORDER_REPLICATE,
     )
-    return cv2.flip(view, 0)
+    return view
 
 
 def preprocess_bgr_for_model(bgr: np.ndarray, device: torch.device) -> torch.Tensor:
