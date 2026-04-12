@@ -53,7 +53,7 @@ PERSPECTIVE_SRC_MARGIN_PX = 12.0
 DATASET_MAP_MARGIN = 80
 TEST_Y_STEP = 10
 # Samples along y on the map. Train images = NUM_TRAIN_FRAMES clean + NUM_TRAIN_FRAMES perturbed
-# when any perturbation σ > 0 below (same y grid, different lateral/yaw).
+# (same y grid) + TRAIN_PERTURB_EXTRA_FRAMES (random y from that grid) when σ > 0 below.
 NUM_TRAIN_FRAMES = 1000
 # Camera lateral (m) = LANE_WIDTH_METERS × fraction: from spline (lane divider) along driver's-right
 # toward the outer edge. 0.5 = geometric center of the right lane; lower if the view hugs the outer edge.
@@ -67,6 +67,8 @@ TRAIN_PERTURB_YAW_STD_DEG = 10.0
 TRAIN_PERTURB_RECENTER_GAIN_LAT = 0.35
 TRAIN_PERTURB_RECENTER_GAIN_YAW = 2.0
 TRAIN_PERTURB_VIEW_RETRIES = 30
+# Extra perturbed-only frames (random ``y`` from the train grid); indices follow aligned perturbed.
+TRAIN_PERTURB_EXTRA_FRAMES = 4000
 # Companion images for perturbed train views (lat/yaw/κ on image); not listed in labels.csv.
 TRAIN_PERTURB_DEBUG_SUBDIR = "train_perturb_debug"
 # Test set: optional extra rows with Gaussian lateral/yaw (same label recipe as perturbed train).
@@ -126,7 +128,7 @@ MODEL_OUTPUT_DIM = 2
 BATCH_SIZE = 16
 # If test loss rises while train drops, try 3e-4 or 1e-4 (Adam).
 LEARNING_RATE = 0.001
-EPOCHS = 50
+EPOCHS = 200
 # Used by ``reproducibility.set_global_seed`` and train ``DataLoader`` shuffle generator.
 TRAIN_SEED = 42
 # First 1..(N-1) epochs are warmup: no best-metric tracking, checkpoints, or best-loss coloring.

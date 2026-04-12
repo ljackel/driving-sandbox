@@ -75,6 +75,47 @@ def get_perspective_view(
     return perspective_camera_view(world_img, near_c, f, r)
 
 
+# Large lateral/yaw often pushes the BEV frustum off-map; scale the same draw down until it fits.
+_PERTURB_BACKOFF_SCALES = (1.0, 0.65, 0.4, 0.2, 0.08, 0.03, 0.01, 0.0)
+
+
+def _sample_perturbed_perspective_view(
+    world_img,
+    yf: float,
+    road_x: float,
+    dxdY: float,
+    right_lane_offset_px: float,
+    px_per_m: float,
+    rng: np.random.Generator,
+    lateral_std_m: float,
+    yaw_std_rad: float,
+):
+    """
+    Sample Gaussian lateral (m) and yaw (rad), shrinking until ``get_perspective_view`` succeeds.
+
+    Returns:
+        ``(view, lat_m, yaw_rad)`` with ``view`` possibly ``None`` if every attempt fails.
+    """
+    for _ in range(cfg.TRAIN_PERTURB_VIEW_RETRIES):
+        lat_draw = float(rng.normal(0.0, lateral_std_m))
+        yaw_draw = float(rng.normal(0.0, yaw_std_rad))
+        for b in _PERTURB_BACKOFF_SCALES:
+            lat_m = float(lat_draw * b)
+            yaw_rad = float(yaw_draw * b)
+            lateral_px = right_lane_offset_px + lat_m * px_per_m
+            view = get_perspective_view(
+                world_img,
+                yf,
+                road_x,
+                dxdY,
+                lateral_offset_px=lateral_px,
+                yaw_offset_rad=yaw_rad,
+            )
+            if view is not None:
+                return view, lat_m, yaw_rad
+    return None, 0.0, 0.0
+
+
 def save_labels_csv(df: pd.DataFrame) -> str:
     """
     Atomically write ``df`` to ``DATA_DIR/LABELS_CSV`` via a temp file and replace.
@@ -199,7 +240,8 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES):
     Render train/test perspective frames, steering labels, and ``data/labels.csv``.
 
     Training samples ``y`` in the upper half of the map; test samples the lower half on a grid.
-    Optionally duplicates the train set with lateral/yaw perturbations when configured.
+    Optionally duplicates the train set with lateral/yaw perturbations when configured, plus
+    ``TRAIN_PERTURB_EXTRA_FRAMES`` additional perturbed samples at random ``y`` on the train grid.
     When ``TEST_PERTURB_*`` σ > 0, each test row also gets a perturbed ``test/frame_{y:04d}_p.jpg``.
 
     Args:
@@ -259,23 +301,17 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES):
             road_x = dw.get_road_center(yf)
             dxdY = float(dw.cs(yf, nu=1))
             idx = num_train + j
-            view = None
-            lat_m = 0.0
-            yaw_rad = 0.0
-            for _ in range(cfg.TRAIN_PERTURB_VIEW_RETRIES):
-                lat_m = float(rng.normal(0.0, cfg.TRAIN_PERTURB_LATERAL_STD_M))
-                yaw_rad = float(rng.normal(0.0, yaw_std))
-                lateral_px = right_lane_offset_px + lat_m * dw.px_per_m
-                view = get_perspective_view(
-                    world,
-                    yf,
-                    road_x,
-                    dxdY,
-                    lateral_offset_px=lateral_px,
-                    yaw_offset_rad=yaw_rad,
-                )
-                if view is not None:
-                    break
+            view, lat_m, yaw_rad = _sample_perturbed_perspective_view(
+                world,
+                yf,
+                road_x,
+                dxdY,
+                right_lane_offset_px,
+                dw.px_per_m,
+                rng,
+                cfg.TRAIN_PERTURB_LATERAL_STD_M,
+                yaw_std,
+            )
             if view is None:
                 continue
             rel_path = f"train/frame_{idx:04d}.jpg"
@@ -288,6 +324,38 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES):
             annotate_perturb_debug_bgr(dbg, lat_m, yaw_rad, kappa)
             dbg_name = f"frame_{idx:04d}.jpg"
             cv2.imwrite(os.path.join(debug_dir, dbg_name), dbg)
+
+        extra_n = int(cfg.TRAIN_PERTURB_EXTRA_FRAMES)
+        if extra_n > 0:
+            base_idx = 2 * num_train
+            for k in range(extra_n):
+                yf = float(rng.choice(y_samples))
+                road_x = dw.get_road_center(yf)
+                dxdY = float(dw.cs(yf, nu=1))
+                idx = base_idx + k
+                view, lat_m, yaw_rad = _sample_perturbed_perspective_view(
+                    world,
+                    yf,
+                    road_x,
+                    dxdY,
+                    right_lane_offset_px,
+                    dw.px_per_m,
+                    rng,
+                    cfg.TRAIN_PERTURB_LATERAL_STD_M,
+                    yaw_std,
+                )
+                if view is None:
+                    continue
+                rel_path = f"train/frame_{idx:04d}.jpg"
+                out = os.path.join(cfg.DATA_DIR, rel_path.replace("/", os.sep))
+                _draw_train_near_vehicle_row_debug_bgr(view)
+                cv2.imwrite(out, view)
+                kappa = signed_path_curvature(dw.cs, yf)
+                records.append((rel_path, kappa, lat_m, yaw_rad))
+                dbg = view.copy()
+                annotate_perturb_debug_bgr(dbg, lat_m, yaw_rad, kappa)
+                dbg_name = f"frame_{idx:04d}.jpg"
+                cv2.imwrite(os.path.join(debug_dir, dbg_name), dbg)
 
     # Test: stepped integer rows in y <= half — clean views, then optional perturbed duplicates.
     test_y_rows = [
@@ -328,23 +396,17 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES):
             yf = float(y)
             road_x = dw.get_road_center(yf)
             dxdY = float(dw.cs(yf, nu=1))
-            view = None
-            lat_m = 0.0
-            yaw_rad = 0.0
-            for _ in range(cfg.TRAIN_PERTURB_VIEW_RETRIES):
-                lat_m = float(rng_test.normal(0.0, cfg.TEST_PERTURB_LATERAL_STD_M))
-                yaw_rad = float(rng_test.normal(0.0, yaw_std))
-                lateral_px = right_lane_offset_px + lat_m * dw.px_per_m
-                view = get_perspective_view(
-                    world,
-                    yf,
-                    road_x,
-                    dxdY,
-                    lateral_offset_px=lateral_px,
-                    yaw_offset_rad=yaw_rad,
-                )
-                if view is not None:
-                    break
+            view, lat_m, yaw_rad = _sample_perturbed_perspective_view(
+                world,
+                yf,
+                road_x,
+                dxdY,
+                right_lane_offset_px,
+                dw.px_per_m,
+                rng_test,
+                cfg.TEST_PERTURB_LATERAL_STD_M,
+                yaw_std,
+            )
             if view is None:
                 continue
             rel_path = f"test/frame_{y:04d}_p.jpg"
