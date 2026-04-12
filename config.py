@@ -21,8 +21,8 @@ SPLINE_NUM_CONTROL_POINTS = 6
 # X offsets from map center for spline control points, bottom → top along the road.
 # Length must match SPLINE_NUM_CONTROL_POINTS. Order: bottom (large y) → top (small y).
 # S-curve strength: x offsets (px from map center), bottom → top; first value 0 = straight start.
-# CubicSpline: dx/dy=0 at bottom (large y). Larger |Δ| = curvier road (stay within ~±200 px of center).
-SPLINE_X_DELTAS_BOTTOM_TO_TOP = (0, 58, -52, 42, -38, 0)
+# CubicSpline: dx/dy=0 at bottom (large y). Larger |Δ| = curvier road (stay within ~±250 px of center).
+SPLINE_X_DELTAS_BOTTOM_TO_TOP = (0, 116, -104, 84, -76, 0)
 ROAD_POLYLINE_SAMPLES = 2000
 LANE_WIDTH_METERS = 4.0
 DASH_LENGTH_METERS = 3.0
