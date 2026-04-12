@@ -99,11 +99,10 @@ def _sample_perturbed_perspective_view(
     for _ in range(cfg.TRAIN_PERTURB_VIEW_RETRIES):
         lat_draw = float(rng.normal(0.0, lateral_std_m))
         yaw_draw = float(rng.normal(0.0, yaw_std_rad))
-        for b in _PERTURB_BACKOFF_SCALES:
-            lat_m = float(lat_draw * b)
-            yaw_rad = float(yaw_draw * b)
+
+        def _warp_attempt(lat_m: float, yaw_rad: float):
             lateral_px = right_lane_offset_px + lat_m * px_per_m
-            view = get_perspective_view(
+            return get_perspective_view(
                 world_img,
                 yf,
                 road_x,
@@ -111,6 +110,26 @@ def _sample_perturbed_perspective_view(
                 lateral_offset_px=lateral_px,
                 yaw_offset_rad=yaw_rad,
             )
+
+        # Coupled backoff (same factor on lateral and yaw).
+        for b in _PERTURB_BACKOFF_SCALES:
+            lat_m = float(lat_draw * b)
+            yaw_rad = float(yaw_draw * b)
+            view = _warp_attempt(lat_m, yaw_rad)
+            if view is not None:
+                return view, lat_m, yaw_rad
+        # Full lateral from draw; reduce yaw only (yaw often leaves the map first).
+        for b_yaw in _PERTURB_BACKOFF_SCALES:
+            lat_m = float(lat_draw)
+            yaw_rad = float(yaw_draw * b_yaw)
+            view = _warp_attempt(lat_m, yaw_rad)
+            if view is not None:
+                return view, lat_m, yaw_rad
+        # Full yaw from draw, reduce lateral only.
+        for b_lat in _PERTURB_BACKOFF_SCALES:
+            lat_m = float(lat_draw * b_lat)
+            yaw_rad = float(yaw_draw)
+            view = _warp_attempt(lat_m, yaw_rad)
             if view is not None:
                 return view, lat_m, yaw_rad
     return None, 0.0, 0.0

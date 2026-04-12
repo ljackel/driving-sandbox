@@ -61,7 +61,9 @@ DATASET_RIGHT_LANE_LATERAL_FRAC = 0.45
 # Road alignment: generate_dataset uses yaw_offset_rad=0 so forward axis matches the path tangent.
 # Second half of train set (when σ > 0): extra samples with Gaussian lateral (m, along lane-right)
 # and optional yaw noise (deg). Labels use κ·scale minus recentering terms below.
-TRAIN_PERTURB_LATERAL_STD_M = 0.5
+# Lateral is applied as lat_m * (WORLD_IMAGE_SIZE / WORLD_METERS) BEV px/m (~2.05); σ=0.5 m → ~1 px,
+# which is visually negligible vs yaw — use ~2 m for several pixels of shift.
+TRAIN_PERTURB_LATERAL_STD_M = 2.2
 TRAIN_PERTURB_YAW_STD_DEG = 10.0
 # Added to steering for perturbed rows: −GAIN_LAT·lat_m − GAIN_YAW·yaw_rad (same scale as κ after scaling).
 TRAIN_PERTURB_RECENTER_GAIN_LAT = 0.35
@@ -73,7 +75,7 @@ TRAIN_PERTURB_EXTRA_FRAMES = 4000
 TRAIN_PERTURB_DEBUG_SUBDIR = "train_perturb_debug"
 # Test set: optional extra rows with Gaussian lateral/yaw (same label recipe as perturbed train).
 # Filenames ``test/frame_{y:04d}_p.jpg`` alongside clean ``test/frame_{y:04d}.jpg``.
-TEST_PERTURB_LATERAL_STD_M = 0.25
+TEST_PERTURB_LATERAL_STD_M = 1.0
 TEST_PERTURB_YAW_STD_DEG = 0.0
 TEST_PERTURB_SEED_OFFSET = 12345
 DATASET_SEED = 42
@@ -128,7 +130,7 @@ MODEL_OUTPUT_DIM = 2
 BATCH_SIZE = 16
 # If test loss rises while train drops, try 3e-4 or 1e-4 (Adam).
 LEARNING_RATE = 0.001
-EPOCHS = 200
+EPOCHS = 100
 # Used by ``reproducibility.set_global_seed`` and train ``DataLoader`` shuffle generator.
 TRAIN_SEED = 42
 # First 1..(N-1) epochs are warmup: no best-metric tracking, checkpoints, or best-loss coloring.
