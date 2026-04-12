@@ -109,7 +109,9 @@ MODEL_OUTPUT_DIM = 2
 # --- Training (train.py) ---
 BATCH_SIZE = 16
 LEARNING_RATE = 0.001
-EPOCHS = 20
+EPOCHS = 500
+# Used by ``reproducibility.set_global_seed`` and train ``DataLoader`` shuffle generator.
+TRAIN_SEED = 42
 NORMALIZE_MEAN = (0.5, 0.5, 0.5)
 NORMALIZE_STD = (0.5, 0.5, 0.5)
 

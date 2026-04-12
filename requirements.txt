@@ -1,6 +1,9 @@
-numpy
-pandas
-opencv-python
-scipy
-matplotlib
-torch
+# Pin or use a lockfile for identical environments across machines.
+numpy>=1.24.0,<3
+pandas>=2.0.0
+opencv-python>=4.8.0
+scipy>=1.11.0
+matplotlib>=3.7.0
+torch>=2.0.0
+torchvision>=0.15.0
+Pillow>=10.0.0

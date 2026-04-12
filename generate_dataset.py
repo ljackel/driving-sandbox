@@ -7,6 +7,10 @@ import numpy as np
 import pandas as pd
 
 import config as cfg
+from reproducibility import set_global_seed
+
+set_global_seed(cfg.DATASET_SEED)
+
 from generate_world import DrivingWorld
 
 

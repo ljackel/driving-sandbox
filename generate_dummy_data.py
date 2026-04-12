@@ -1,10 +1,14 @@
 """Generate random RGB crops and a matching labels CSV under ``dummy_data/`` (no functions)."""
 import os
-import pandas as pd
+
 import numpy as np
+import pandas as pd
 from PIL import Image
 
 import config as cfg
+from reproducibility import set_global_seed
+
+set_global_seed(cfg.TRAIN_SEED)
 
 # 1. Setup directories
 data_dir = "dummy_data"

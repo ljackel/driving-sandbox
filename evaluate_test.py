@@ -13,6 +13,10 @@ from torchvision import transforms
 
 import config as cfg
 from data_loader import DrivingDataset
+from reproducibility import set_global_seed
+
+set_global_seed(cfg.TRAIN_SEED)
+
 from driving_model import DrivingNet
 
 

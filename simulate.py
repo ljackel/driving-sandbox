@@ -12,6 +12,10 @@ import numpy as np
 import torch
 
 import config as cfg
+from reproducibility import set_global_seed
+
+set_global_seed(cfg.TRAIN_SEED)
+
 from driving_model import DrivingNet
 from generate_world import DrivingWorld
 

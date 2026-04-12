@@ -12,8 +12,12 @@ from torchvision import transforms
 
 import config as cfg
 from data_loader import DrivingDataset
-from driving_model import DrivingNet
 from generate_world import DrivingWorld
+from reproducibility import set_global_seed
+
+set_global_seed(cfg.TRAIN_SEED)
+
+from driving_model import DrivingNet
 
 
 def _labels_csv_path() -> str:
@@ -52,7 +56,13 @@ dataset = DrivingDataset(
     transform=transform,
     path_prefix="train/",
 )
-train_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+_train_gen = torch.Generator().manual_seed(cfg.TRAIN_SEED)
+train_loader = DataLoader(
+    dataset,
+    batch_size=batch_size,
+    shuffle=True,
+    generator=_train_gen,
+)
 
 test_dataset = DrivingDataset(
     csv_file=_labels_csv_path(),
@@ -149,6 +159,7 @@ training_log = {
     "epochs": epochs,
     "batch_size": batch_size,
     "learning_rate": learning_rate,
+    "train_seed": cfg.TRAIN_SEED,
     "metrics": metrics,
 }
 with open(os.path.join(run_dir, "training_log.json"), "w", encoding="utf-8") as f:
