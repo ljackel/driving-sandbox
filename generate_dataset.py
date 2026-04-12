@@ -259,9 +259,9 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES):
     Render train/test perspective frames, steering labels, and ``data/labels.csv``.
 
     Training samples ``y`` in the upper half of the map; test samples the lower half on a grid.
-    Optionally duplicates the train set with lateral/yaw perturbations when configured, plus
-    ``TRAIN_PERTURB_EXTRA_FRAMES`` additional perturbed samples at random ``y`` on the train grid.
-    When ``TEST_PERTURB_*`` σ > 0, each test row also gets a perturbed ``test/frame_{y:04d}_p.jpg``.
+    Optionally duplicates the train set with lateral (and optional yaw) perturbations, plus optional
+    ``TRAIN_PERTURB_EXTRA_FRAMES`` random-``y`` lateral copies. When test lateral σ > 0, up to
+    ``TEST_PERTURB_NUM_FRAMES`` test rows get ``test/frame_{y:04d}_p.jpg``.
 
     Args:
         num_train: Number of base road positions (before optional perturbed duplicate set).
@@ -411,7 +411,16 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES):
             cfg.DATASET_SEED + cfg.TEST_PERTURB_SEED_OFFSET
         )
         yaw_std = float(np.deg2rad(cfg.TEST_PERTURB_YAW_STD_DEG))
-        for y in test_y_rows:
+        ty_list = list(test_y_rows)
+        n_cap = int(cfg.TEST_PERTURB_NUM_FRAMES)
+        if n_cap <= 0:
+            test_y_perturb = []
+        elif len(ty_list) > n_cap:
+            pick = rng_test.choice(len(ty_list), size=n_cap, replace=False)
+            test_y_perturb = [ty_list[i] for i in sorted(pick)]
+        else:
+            test_y_perturb = ty_list
+        for y in test_y_perturb:
             yf = float(y)
             road_x = dw.get_road_center(yf)
             dxdY = float(dw.cs(yf, nu=1))
