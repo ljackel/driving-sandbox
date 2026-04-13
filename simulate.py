@@ -11,7 +11,8 @@ set in ``config`` (from ``kappa_max * SIM_SPEED_M_S * px_per_m`` on the train/te
 units line up with scaled-curvature labels. There is no separate tracking controller—small prediction
 errors compound (classic BC / "open loop" in the ML sense).
 
-**Visualization:** The red overlay traces the right-lane camera path, not the centerline.
+**Visualization:** The red BEV overlay traces the right-lane camera path. With ``SIM_FP_VIDEO_ENABLE``,
+each driver crop is also written to ``sim_first_person.mp4`` in the same output folder as ``sim_path.png``.
 """
 from __future__ import annotations
 
@@ -198,13 +199,23 @@ def find_start_pose_bottom(
     return x0, y0, psi
 
 
-def run_simulation() -> tuple[np.ndarray, list[tuple[float, float, float]], str, float]:
+def run_simulation() -> tuple[
+    np.ndarray,
+    list[tuple[float, float, float]],
+    str,
+    float,
+    str | None,
+]:
     """
     Load the newest checkpoint and roll out: crop -> ``DrivingNet`` channel 0 -> yaw rate via
     ``SIM_YAW_RATE_GAIN`` -> integrate ``(x, y, psi)`` with step length ``SIM_SPEED_M_S * SIM_DT * px_per_m``.
 
+    When ``SIM_FP_VIDEO_ENABLE`` is true, writes each driver crop (plus a final pose frame when
+    available) to ``<simulation_output_dir>/<SIM_FP_VIDEO_FILENAME>`` at ``SIM_VIDEO_FPS``.
+
     Returns:
-        ``world_bgr``, list of **centerline** ``(x, y, psi)`` (psi in rad), checkpoint path, ``px_per_m``.
+        ``world_bgr``, list of **centerline** ``(x, y, psi)`` (psi in rad), checkpoint path,
+        ``px_per_m``, and absolute path to the first-person MP4 if recorded, else ``None``.
     """
     ckpt = latest_checkpoint_path()
     if ckpt is None:
@@ -230,6 +241,13 @@ def run_simulation() -> tuple[np.ndarray, list[tuple[float, float, float]], str,
     )
     print(f"Weights: {os.path.abspath(ckpt)}")
 
+    out_dir = simulation_output_dir(ckpt)
+    fp_video_abs: str | None = None
+    video_writer: cv2.VideoWriter | None = None
+    if cfg.SIM_FP_VIDEO_ENABLE:
+        os.makedirs(out_dir, exist_ok=True)
+        fp_video_abs = os.path.join(out_dir, cfg.SIM_FP_VIDEO_FILENAME)
+
     path: list[tuple[float, float, float]] = [(x0, y0, psi)]
     x, y = x0, y0
     step_dist_px = cfg.SIM_SPEED_M_S * cfg.SIM_DT * px_per_m
@@ -246,6 +264,25 @@ def run_simulation() -> tuple[np.ndarray, list[tuple[float, float, float]], str,
         if view is None:
             break
 
+        if fp_video_abs is not None:
+            vh, vw = view.shape[:2]
+            if video_writer is None:
+                video_writer = cv2.VideoWriter(
+                    fp_video_abs,
+                    cv2.VideoWriter_fourcc(*"mp4v"),
+                    float(cfg.SIM_VIDEO_FPS),
+                    (vw, vh),
+                )
+                if not video_writer.isOpened():
+                    print(
+                        f"Warning: could not open video writer for {fp_video_abs!r}; "
+                        "skipping first-person MP4."
+                    )
+                    fp_video_abs = None
+                    video_writer = None
+            if video_writer is not None:
+                video_writer.write(view)
+
         with torch.no_grad():
             inp = preprocess_bgr_for_model(view, device)
             steering = float(model(inp)[0, 0].item())
@@ -259,12 +296,22 @@ def run_simulation() -> tuple[np.ndarray, list[tuple[float, float, float]], str,
         if x < 0 or x >= w or y < 0 or y >= h:
             break
 
-    return world, path, ckpt, px_per_m
+    if video_writer is not None:
+        view_end = get_view_from_pose(world, x, y, psi, lateral_px)
+        if view_end is not None:
+            video_writer.write(view_end)
+        video_writer.release()
+        fp_video_abs = os.path.abspath(fp_video_abs) if fp_video_abs else None
+    elif cfg.SIM_FP_VIDEO_ENABLE and fp_video_abs is not None:
+        # Enabled but no frames (e.g. immediate warp failure).
+        fp_video_abs = None
+
+    return world, path, ckpt, px_per_m, fp_video_abs
 
 
 def main() -> None:
-    """Run simulation, save path overlay and CSV, print stats, show matplotlib figure."""
-    world_bgr, path, ckpt, px_per_m = run_simulation()
+    """Run simulation, save BEV overlay, CSV, first-person MP4 (if enabled), print stats, show figure."""
+    world_bgr, path, ckpt, px_per_m, fp_video = run_simulation()
     path_arr = np.array(path, dtype=np.float64)
 
     lateral_px = float(cfg.SIM_EGO_LATERAL_OFFSET_M) * px_per_m
@@ -310,6 +357,8 @@ def main() -> None:
         print(f"Poses: {len(path)}")
     print(f"Saved overlay: {out_png!r}")
     print(f"Saved trajectory: {out_csv!r}")
+    if fp_video:
+        print(f"Saved first-person video: {fp_video!r} ({cfg.SIM_VIDEO_FPS} FPS)")
 
     plt.figure(figsize=(10, 10))
     plt.imshow(cv2.cvtColor(vis, cv2.COLOR_BGR2RGB))

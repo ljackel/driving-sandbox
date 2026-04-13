@@ -12,7 +12,7 @@ Summary:
   perturbed rows (``generate_dataset``).
 - **Training:** MSE on ``DrivingNet`` channel 0 only; see ``LEARNING_RATE``, ``EPOCHS``.
 - **Simulation:** ``SIM_YAW_RATE_GAIN`` from ``_compute_sim_yaw_rate_gain`` aligns ``psi += steering * gain * dt``
-  with curvature step semantics on the train/test ``y`` grid.
+  with curvature step semantics on the train/test ``y`` grid. Optional first-person MP4: ``SIM_FP_VIDEO_*``.
 """
 from __future__ import annotations
 
@@ -209,6 +209,11 @@ SIM_MAX_STEPS = 200_000
 SIM_EGO_LATERAL_OFFSET_M = LANE_WIDTH_METERS * DATASET_RIGHT_LANE_LATERAL_FRAC
 # Start as low as possible: try y = h-1, then move up until perspective warp fits.
 SIM_START_MAX_INSET_PX = 200
+# First-person video from ``simulate.run_simulation`` (same resolution as ``CAMERA_IMAGE_SIZE``).
+SIM_FP_VIDEO_ENABLE = True
+SIM_FP_VIDEO_FILENAME = "sim_first_person.mp4"
+# Playback speed matches one simulation step per frame (``1 / SIM_DT``).
+SIM_VIDEO_FPS = 1.0 / SIM_DT
 
 # --- Dummy data (generate_dummy_data.py) ---
 DUMMY_NUM_SAMPLES = 100
