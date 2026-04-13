@@ -1,6 +1,6 @@
 """
-Render perspective crops and ``data/labels.csv``: bottom-half train, top-half test, optional
-perturbations (shared ``PERTURB_*``), global kappa scaling, and steering recentering on perturbed rows.
+Render perspective crops and ``data/labels.csv``: train from bottom BEV half, test from top half,
+optional perturbations (shared ``PERTURB_*``), global kappa scaling, and steering recentering on perturbed rows.
 """
 import math
 import os
@@ -294,7 +294,6 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES, num_test=cfg.NUM_TEST_FRAMES):
     margin = cfg.DATASET_MAP_MARGIN
     records: list[tuple[str, float, float, float]] = []
 
-    # BEV y increases downward: bottom half of the map = large y; top half = small y.
     half = size // 2
     train_y = np.linspace(
         float(size - margin),

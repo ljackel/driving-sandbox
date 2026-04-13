@@ -1,8 +1,25 @@
-import torch
-from torch.utils.data import Dataset, DataLoader
-from PIL import Image
-import pandas as pd
 import os
+
+import pandas as pd
+import torch
+from PIL import Image
+from torch.utils.data import Dataset, DataLoader
+
+import config as cfg
+
+
+def prepare_perspective_pil_for_model(im: Image.Image) -> Image.Image:
+    """
+    Optionally crop to the bottom half of the perspective image (rows nearest the vehicle).
+
+    Used before ``Resize`` to ``CAMERA_IMAGE_SIZE`` in ``train.py``, ``evaluate_test.py``. When
+    ``PERSPECTIVE_INPUT_BOTTOM_HALF_ONLY`` is false, returns ``im`` unchanged.
+    """
+    if not cfg.PERSPECTIVE_INPUT_BOTTOM_HALF_ONLY:
+        return im
+    w, h = im.size
+    return im.crop((0, h // 2, w, h))
+
 
 class DrivingDataset(Dataset):
     """

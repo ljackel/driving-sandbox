@@ -18,7 +18,7 @@ from torch.utils.data import DataLoader
 from torchvision import transforms
 
 import config as cfg
-from data_loader import DrivingDataset
+from data_loader import DrivingDataset, prepare_perspective_pil_for_model
 from generate_world import DrivingWorld
 from reproducibility import set_global_seed
 
@@ -60,9 +60,10 @@ batch_size = cfg.BATCH_SIZE
 learning_rate = cfg.LEARNING_RATE
 epochs = cfg.EPOCHS
 
-# 2. Image Preprocessing (Standard for PyTorch)
+# 2. Image preprocessing (optional bottom-half crop near ego, then square resize — see ``config``)
 transform = transforms.Compose(
     [
+        transforms.Lambda(prepare_perspective_pil_for_model),
         transforms.Resize((cfg.CAMERA_IMAGE_SIZE, cfg.CAMERA_IMAGE_SIZE)),
         transforms.ToTensor(),
         transforms.Normalize(cfg.NORMALIZE_MEAN, cfg.NORMALIZE_STD),

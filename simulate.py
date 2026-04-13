@@ -12,7 +12,11 @@ units line up with scaled-curvature labels. There is no separate tracking contro
 errors compound (classic BC / "open loop" in the ML sense).
 
 **Visualization:** The red BEV overlay traces the right-lane camera path. With ``SIM_FP_VIDEO_ENABLE``,
-each driver crop is also written to ``sim_first_person.mp4`` in the same output folder as ``sim_path.png``.
+each driver crop is written to ``sim_first_person.mp4`` (same preprocessing as the model when
+``PERSPECTIVE_INPUT_BOTTOM_HALF_ONLY`` is true: bottom half of the warp, resized to ``CAMERA_IMAGE_SIZE``).
+
+**Input crop:** ``PERSPECTIVE_INPUT_BOTTOM_HALF_ONLY`` matches ``train.py`` / ``evaluate_test.py`` (bottom
+half of the warp, then resize to ``CAMERA_IMAGE_SIZE``).
 """
 from __future__ import annotations
 
@@ -113,12 +117,34 @@ def get_view_from_pose(
     return perspective_camera_view(world_bgr, near_c, f, r)
 
 
+def _fp_video_frame_bgr(view: np.ndarray) -> np.ndarray:
+    """BGR frame for MP4: full warp or bottom-half crop resized to ``CAMERA_IMAGE_SIZE`` (matches model)."""
+    if not cfg.PERSPECTIVE_INPUT_BOTTOM_HALF_ONLY:
+        return view
+    h0, w0 = view.shape[:2]
+    crop = view[h0 // 2 : h0, 0:w0]
+    return cv2.resize(
+        crop,
+        (cfg.CAMERA_IMAGE_SIZE, cfg.CAMERA_IMAGE_SIZE),
+        interpolation=cv2.INTER_LINEAR,
+    )
+
+
 def preprocess_bgr_for_model(bgr: np.ndarray, device: torch.device) -> torch.Tensor:
     """
     Convert BGR uint8 warp output to a normalized NCHW float tensor on ``device``.
 
-    Matches training normalization (RGB channel order, ``NORMALIZE_MEAN`` / ``NORMALIZE_STD``).
+    Applies the same optional bottom-half crop + square resize as ``prepare_perspective_pil_for_model``
+    + ``train`` transforms. Uses ``NORMALIZE_MEAN`` / ``NORMALIZE_STD``.
     """
+    if cfg.PERSPECTIVE_INPUT_BOTTOM_HALF_ONLY:
+        h0, w0 = bgr.shape[:2]
+        bgr = bgr[h0 // 2 : h0, 0:w0]
+        bgr = cv2.resize(
+            bgr,
+            (cfg.CAMERA_IMAGE_SIZE, cfg.CAMERA_IMAGE_SIZE),
+            interpolation=cv2.INTER_LINEAR,
+        )
     rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
     t = torch.from_numpy(rgb).permute(2, 0, 1).float() / 255.0
     for c in range(3):
@@ -265,7 +291,8 @@ def run_simulation() -> tuple[
             break
 
         if fp_video_abs is not None:
-            vh, vw = view.shape[:2]
+            vframe = _fp_video_frame_bgr(view)
+            vh, vw = vframe.shape[:2]
             if video_writer is None:
                 video_writer = cv2.VideoWriter(
                     fp_video_abs,
@@ -281,7 +308,7 @@ def run_simulation() -> tuple[
                     fp_video_abs = None
                     video_writer = None
             if video_writer is not None:
-                video_writer.write(view)
+                video_writer.write(vframe)
 
         with torch.no_grad():
             inp = preprocess_bgr_for_model(view, device)
@@ -299,7 +326,7 @@ def run_simulation() -> tuple[
     if video_writer is not None:
         view_end = get_view_from_pose(world, x, y, psi, lateral_px)
         if view_end is not None:
-            video_writer.write(view_end)
+            video_writer.write(_fp_video_frame_bgr(view_end))
         video_writer.release()
         fp_video_abs = os.path.abspath(fp_video_abs) if fp_video_abs else None
     elif cfg.SIM_FP_VIDEO_ENABLE and fp_video_abs is not None:

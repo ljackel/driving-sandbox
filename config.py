@@ -4,10 +4,9 @@ Central numerical (and related) hyperparameters for the driving sandbox.
 Summary:
 
 - **World:** S-curve from ``SPLINE_X_DELTAS_BOTTOM_TO_TOP`` (``generate_world``).
-- **Dataset:** Train = bottom BEV half (large ``y``); test = top half (small ``y``). Train =
-  ``NUM_TRAIN_FRAMES`` clean, plus that many aligned perturbed frames when ``PERTURB_*`` sigma > 0,
-  plus ``TRAIN_PERTURB_EXTRA_FRAMES`` extra perturbed frames at random train ``y``. Test =
-  ``NUM_TEST_FRAMES`` clean + that many perturbed (same ``PERTURB_*`` as train).
+- **Dataset:** Train = bottom BEV half (large ``y``); test = top half (small ``y``). See ``NUM_TRAIN_FRAMES``, ``NUM_TEST_FRAMES``, perturb settings.
+- **Model input:** ``PERSPECTIVE_INPUT_BOTTOM_HALF_ONLY`` uses only the bottom half of each perspective
+  crop (near-ego pixels), resized to ``CAMERA_IMAGE_SIZE``; otherwise the full crop is used.
 - **Labels:** Steering is ``kappa / max|kappa|`` over all CSV rows, minus lateral/yaw recentering on
   perturbed rows (``generate_dataset``).
 - **Training:** MSE on ``DrivingNet`` channel 0 only; see ``LEARNING_RATE``, ``EPOCHS``.
@@ -59,13 +58,15 @@ PERSPECTIVE_NEAR_HALF_WIDTH = 14.0
 # Near the map edge, a small heading change can spill ~1px past the border; without this,
 # open-loop sim often stops after one step. Warp uses replicate padding for out-of-map samples.
 PERSPECTIVE_SRC_MARGIN_PX = 12.0
+# If true: for ``train`` / ``evaluate_test`` / ``simulate``, crop each perspective image to its
+# bottom half (nearest the vehicle), then resize to ``CAMERA_IMAGE_SIZE``. If false: use the full square.
+PERSPECTIVE_INPUT_BOTTOM_HALF_ONLY = True
 
 # --- Dataset generation ---
 # BEV ``y`` increases downward. Train samples the bottom half (large ``y``); test the top half
 # (small ``y``), disjoint at the midline. With perturbations on: each split gets one clean + one
-# aligned perturbed frame per sampled ``y`` using shared ``PERTURB_LATERAL_STD_M`` /
-# ``PERTURB_YAW_STD_DEG``. ``TRAIN_PERTURB_EXTRA_FRAMES`` adds more perturbed train frames at random
-# train ``y`` (same sampling/backoff as aligned perturbed); test perturb RNG adds ``TEST_PERTURB_SEED_OFFSET``.
+# aligned perturbed frame per sampled ``y`` (``PERTURB_*``). ``TRAIN_PERTURB_EXTRA_FRAMES`` adds
+# extra perturbed train frames at random train ``y``; test perturb RNG uses ``TEST_PERTURB_SEED_OFFSET``.
 DATASET_MAP_MARGIN = 80
 NUM_TRAIN_FRAMES = 1000
 NUM_TEST_FRAMES = 100

@@ -1,7 +1,7 @@
 """
 Evaluate ``DrivingNet`` on the **test** split (``test/`` rows in ``labels.csv``).
 
-Test images come from the **top** BEV half; train from the **bottom** half (see ``generate_dataset``).
+Test images are from the top BEV half; train from the bottom (see ``generate_dataset``).
 Compare predicted **channel 0** to CSV steering. Writes ``data/test_pred/*.jpg`` with target (white)
 and prediction (yellow) overlaid.
 """
@@ -14,7 +14,7 @@ from torch.utils.data import DataLoader
 from torchvision import transforms
 
 import config as cfg
-from data_loader import DrivingDataset
+from data_loader import DrivingDataset, prepare_perspective_pil_for_model
 from reproducibility import set_global_seed
 
 set_global_seed(cfg.TRAIN_SEED)
@@ -76,6 +76,7 @@ def main():
 
     transform = transforms.Compose(
         [
+            transforms.Lambda(prepare_perspective_pil_for_model),
             transforms.Resize((cfg.CAMERA_IMAGE_SIZE, cfg.CAMERA_IMAGE_SIZE)),
             transforms.ToTensor(),
             transforms.Normalize(cfg.NORMALIZE_MEAN, cfg.NORMALIZE_STD),
