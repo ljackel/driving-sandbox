@@ -1,7 +1,8 @@
 """
 Train ``DrivingNet`` on ``data/labels.csv`` (MSE on output **channel 0** vs steering targets).
 
-Uses rows with ``train/`` prefix for training and ``test/`` for validation. Checkpoints on best test
+Uses rows with ``train/`` prefix for training and ``test/`` for validation (geographic or mixed road
+sampling per ``generate_dataset`` / ``DATASET_MIX_TRAIN_TEST_GEOGRAPHY``). Checkpoints on best test
 loss after ``CHECKPOINT_MIN_EPOCH`` (or best train loss if no test rows). Hyperparameters in ``config``.
 """
 import json

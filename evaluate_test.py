@@ -1,7 +1,8 @@
 """
 Evaluate ``DrivingNet`` on the **test** split (``test/`` rows in ``labels.csv``).
 
-Test images are from the top BEV half; train from the bottom (see ``generate_dataset``).
+By default test ``y`` is the top BEV half and train the bottom; if ``DATASET_MIX_TRAIN_TEST_GEOGRAPHY``
+is true when generating data, both splits mix the full road (see ``generate_dataset``).
 Compare predicted **channel 0** to CSV steering. Writes ``data/test_pred/*.jpg`` with target (white)
 and prediction (yellow) overlaid.
 """

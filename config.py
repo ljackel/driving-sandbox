@@ -4,7 +4,8 @@ Central numerical (and related) hyperparameters for the driving sandbox.
 Summary:
 
 - **World:** S-curve from ``SPLINE_X_DELTAS_BOTTOM_TO_TOP`` (``generate_world``).
-- **Dataset:** Train = bottom BEV half (large ``y``); test = top half (small ``y``). See ``NUM_TRAIN_FRAMES``, ``NUM_TEST_FRAMES``, perturb settings.
+- **Dataset:** By default train = bottom BEV half, test = top half. If ``DATASET_MIX_TRAIN_TEST_GEOGRAPHY`` is
+  true, both splits sample the full road via shuffle-split (``DATASET_SEED``). See ``NUM_TRAIN_FRAMES``, etc.
 - **Model input:** ``PERSPECTIVE_INPUT_BOTTOM_HALF_ONLY`` uses only the bottom half of each perspective
   crop (near-ego pixels), resized to ``CAMERA_IMAGE_SIZE``; otherwise the full crop is used.
 - **Labels:** Steering is ``kappa / max|kappa|`` over all CSV rows, minus lateral/yaw recentering on
@@ -63,10 +64,14 @@ PERSPECTIVE_SRC_MARGIN_PX = 12.0
 PERSPECTIVE_INPUT_BOTTOM_HALF_ONLY = True
 
 # --- Dataset generation ---
-# BEV ``y`` increases downward. Train samples the bottom half (large ``y``); test the top half
-# (small ``y``), disjoint at the midline. With perturbations on: each split gets one clean + one
-# aligned perturbed frame per sampled ``y`` (``PERTURB_*``). ``TRAIN_PERTURB_EXTRA_FRAMES`` adds
-# extra perturbed train frames at random train ``y``; test perturb RNG uses ``TEST_PERTURB_SEED_OFFSET``.
+# BEV ``y`` increases downward. ``DATASET_MIX_TRAIN_TEST_GEOGRAPHY``: if false, train uses only the
+# bottom half (large ``y``) and test only the top half (small ``y``), disjoint at the midline. If true,
+# ``NUM_TRAIN_FRAMES + NUM_TEST_FRAMES`` positions are equally spaced along the full span
+# ``[margin, size - margin]`` and split at random (``DATASET_SEED``), so both train and test mix
+# top and bottom road geometry. With perturbations on: each split gets one clean + one aligned
+# perturbed frame per sampled ``y`` (``PERTURB_*``). ``TRAIN_PERTURB_EXTRA_FRAMES`` draws ``y`` from
+# the train grid; test perturb RNG uses ``TEST_PERTURB_SEED_OFFSET``.
+DATASET_MIX_TRAIN_TEST_GEOGRAPHY = True
 DATASET_MAP_MARGIN = 80
 NUM_TRAIN_FRAMES = 1000
 NUM_TEST_FRAMES = 100
@@ -148,7 +153,7 @@ BATCH_SIZE = 16
 # Adam: ``1e-3`` often stalls near predicting mean steering; ``3e-4`` (or ``1e-4``) fits this task reliably.
 LEARNING_RATE = 3e-4
 # Increase when the dataset grows (e.g. many extra perturb frames); ``CHECKPOINT_MIN_EPOCH`` delays best-metric checkpoints.
-EPOCHS = 200
+EPOCHS = 20
 # Used by ``reproducibility.set_global_seed`` and train ``DataLoader`` shuffle generator.
 TRAIN_SEED = 42
 # First 1..(N-1) epochs are warmup: no best-metric tracking, checkpoints, or best-loss coloring.
@@ -170,24 +175,19 @@ def _compute_sim_yaw_rate_gain() -> float:
     """
     import numpy as np
 
-    from generate_dataset import signed_path_curvature
+    from generate_dataset import dataset_train_test_y, signed_path_curvature
     from generate_world import DrivingWorld
 
     dw = DrivingWorld()
     size = dw.size
     margin = DATASET_MAP_MARGIN
-    half = size // 2
-    train_y = np.linspace(
-        float(size - margin),
-        float(half) + 1.0,
+    train_y, test_y = dataset_train_test_y(
         int(NUM_TRAIN_FRAMES),
-        dtype=np.float64,
-    )
-    test_y = np.linspace(
-        float(half),
-        float(margin),
         int(NUM_TEST_FRAMES),
-        dtype=np.float64,
+        size,
+        margin,
+        mix_train_test_geography=DATASET_MIX_TRAIN_TEST_GEOGRAPHY,
+        seed=DATASET_SEED,
     )
     kmax = 0.0
     for yf in np.concatenate((train_y, test_y)):
