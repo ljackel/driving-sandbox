@@ -2,8 +2,8 @@
 Render perspective crops and ``data/labels.csv``.
 
 By default train samples the bottom BEV half and test the top half. With
-``DATASET_MIX_TRAIN_TEST_GEOGRAPHY``, both splits mix the full road (shuffle-split). Optional
-perturbations (``PERTURB_*``), global kappa scaling, steering recentering on perturbed rows.
+``DATASET_MIX_TRAIN_TEST_GEOGRAPHY``, both splits mix the full road (shuffle-split). Lateral/yaw
+perturbations when ``DATASET_PERTURBATIONS_ENABLE`` and ``PERTURB_*`` σ > 0; global κ scaling and clip.
 """
 import math
 import os
@@ -325,13 +325,12 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES, num_test=cfg.NUM_TEST_FRAMES):
     via shuffle-split (see ``dataset_train_test_y``).
 
     **Train filenames:** ``train/frame_{0..num_train-1}.jpg`` (clean), then
-    ``train/frame_{num_train..2*num_train-1}.jpg`` (aligned perturbed, same ``y`` grid as clean) when
-    ``PERTURB_LATERAL_STD_M`` or ``PERTURB_YAW_STD_DEG`` > 0, then
-    ``train/frame_{2*num_train..}.jpg`` for ``TRAIN_PERTURB_EXTRA_FRAMES`` extra perturbed frames with
-    ``y`` drawn uniformly from the train grid (same Gaussian lateral/yaw and backoff as aligned).
+    ``train/frame_{num_train..2*num_train-1}.jpg`` (aligned perturbed) when
+    ``DATASET_PERTURBATIONS_ENABLE`` and lateral or yaw σ > 0, then
+    ``train/frame_{2*num_train..}.jpg`` for ``TRAIN_PERTURB_EXTRA_FRAMES`` extra perturbed frames.
 
     **Test filenames:** ``test/frame_{0..num_test-1}.jpg`` (clean), then
-    ``test/frame_{num_test..2*num_test-1}.jpg`` (perturbed) when perturbations are on.
+    ``test/frame_{num_test..2*num_test-1}.jpg`` (perturbed) under the same perturbation conditions.
 
     Args:
         num_train: Number of clean road samples (and of aligned perturbed mates if perturbing).
@@ -381,7 +380,7 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES, num_test=cfg.NUM_TEST_FRAMES):
         kappa = signed_path_curvature(dw.cs, yf)
         records.append((rel_path, kappa, 0.0, 0.0))
 
-    perturb_train = (
+    perturb_train = cfg.DATASET_PERTURBATIONS_ENABLE and (
         cfg.PERTURB_LATERAL_STD_M > 0.0 or cfg.PERTURB_YAW_STD_DEG > 0.0
     )
     if perturb_train:
@@ -469,7 +468,7 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES, num_test=cfg.NUM_TEST_FRAMES):
         kappa = signed_path_curvature(dw.cs, yf)
         records.append((rel_path, kappa, 0.0, 0.0))
 
-    perturb_test = (
+    perturb_test = cfg.DATASET_PERTURBATIONS_ENABLE and (
         cfg.PERTURB_LATERAL_STD_M > 0.0 or cfg.PERTURB_YAW_STD_DEG > 0.0
     )
     if perturb_test:

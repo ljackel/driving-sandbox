@@ -70,6 +70,18 @@ def _composite(clean: np.ndarray, pert: np.ndarray, scale: float = 8.0) -> np.nd
 
 
 def main() -> None:
+    if not cfg.DATASET_PERTURBATIONS_ENABLE:
+        print(
+            "DATASET_PERTURBATIONS_ENABLE is false in config. Set it true, ensure nonzero PERTURB_* σ "
+            "if needed, and regenerate the dataset."
+        )
+        return
+    if cfg.PERTURB_LATERAL_STD_M <= 0.0 and cfg.PERTURB_YAW_STD_DEG <= 0.0:
+        print(
+            "Perturbation σ are both 0; no perturbed frames are generated. Set PERTURB_LATERAL_STD_M "
+            "or PERTURB_YAW_STD_DEG and regenerate the dataset."
+        )
+        return
     n = cfg.NUM_TRAIN_FRAMES
     train_dir = os.path.join(cfg.DATA_DIR, "train")
     out_dir = os.path.join(cfg.DATA_DIR, "perturb_compare")

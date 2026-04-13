@@ -25,7 +25,8 @@ class DrivingDataset(Dataset):
     """
     PyTorch dataset: ``image_path`` and ``steering`` columns from ``labels.csv``.
 
-    Steering matches ``generate_dataset`` (scaled κ with recentering on perturbed rows), clipped to
+    Steering matches ``generate_dataset`` (scaled κ; recentering on perturbed rows when enabled in
+    ``config``), clipped to
     ``[STEERING_CLIP_MIN, STEERING_CLIP_MAX]``.
     """
 
