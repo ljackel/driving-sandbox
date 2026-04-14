@@ -146,6 +146,9 @@ ROADKILL_ALONG_MAX_LANE_WIDTHS = 2.2
 # Off-ramp geometry (see ``OFFRAMP_ENABLE`` in switches): branch on main centerline; image-row fraction
 # (0 = top, 1 = bottom). Must be > 0.5 for bottom-half exit; ignored otherwise.
 OFFRAMP_BRANCH_Y_FRAC = 0.78
+# Additional exits at explicit BEV ``y`` rows (pixels). Each gets the same Bézier deltas as above.
+# Sorted with the primary branch by ``y`` (descending): first encountered when driving from the map bottom.
+OFFRAMP_EXTRA_BRANCH_Y_PX = (200.0,)
 # Quadratic Bézier from branch: control point lies ``OFFRAMP_TANGENT_CTRL_PX`` along the **main-road tangent**
 # (traffic toward decreasing ``y``) so the merge is not a sharp kink; end vertex is branch + (Δx, Δy).
 OFFRAMP_TANGENT_CTRL_PX = 95.0

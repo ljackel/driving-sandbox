@@ -260,10 +260,14 @@ def lateral_offset_px_avoid_roadkill(
     dw: DrivingWorld | None = None,
     x_center: float | None = None,
     psi: float | None = None,
+    on_main_road: bool = True,
 ) -> float:
     """
     Signed lateral offset (px) along driver's right: nominal right-lane center, or mirrored left-lane
     when passing the roadkill band (smooth ramps).
+
+    Roadkill splats live on the **main** road only; set ``on_main_road=False`` for off-ramp poses
+    (matches ``generate_dataset`` off-ramp crops, which use a fixed right-lane offset).
 
     If ``for_training_labels`` is true (``generate_dataset`` main road), only obstacles in
     ``ROADKILL_OBSTACLE_Y_PX`` contribute. If false (default, ``simulate``), eval-only rows are included too.
@@ -275,6 +279,8 @@ def lateral_offset_px_avoid_roadkill(
     """
     r = float(right_lane_center_offset_px)
     if not cfg.ROADKILL_ENABLE:
+        return r
+    if not on_main_road:
         return r
     use_vis = bool(getattr(cfg, "ROADKILL_DETOUR_ONLY_WHEN_VISIBLE", True))
     if (
@@ -330,7 +336,8 @@ def _bezier_quadratic_xy_batch(
 class DrivingWorld:
     """
     Top-down raster map: cubic-spline centerline from ``SPLINE_X_DELTAS_BOTTOM_TO_TOP``, two-lane road,
-    dashed center marking, optional bottom-half off-ramp (``OFFRAMP_*``), optional right-lane roadkill
+    dashed center marking, optional off-ramps (``OFFRAMP_*``; primary branch + ``OFFRAMP_EXTRA_BRANCH_Y_PX``),
+    optional right-lane roadkill
     obstacle(s) (``ROADKILL_*``; map shows training + eval-only rows). Curvature of the **main** spline drives
     dataset steering labels after global scaling; dataset lateral uses only ``ROADKILL_OBSTACLE_Y_PX``.
     """
@@ -397,18 +404,38 @@ class DrivingWorld:
         yi = np.interp(t, s, p[:, 1])
         return np.column_stack((xi, yi)).astype(np.int32)
 
-    def _offramp_bezier_controls(self) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+    def offramp_branch_y_pxs(self) -> tuple[float, ...]:
         """
-        Quadratic Bézier control points ``p0, p1, p2`` (image px), or ``None`` if the off-ramp is off.
-
-        ``p0`` is on the main centerline; ``p1`` lies along the main-road tangent (traffic toward
-        decreasing ``y``) so departure is smooth.
+        Branch rows on the main centerline (BEV ``y``, descending = first merge when driving from
+        the bottom of the map).
         """
         if not cfg.OFFRAMP_ENABLE:
+            return tuple()
+        ys: list[float] = []
+        y_main = float(np.clip(cfg.OFFRAMP_BRANCH_Y_FRAC, 0.0, 1.0)) * float(
+            self.size
+        )
+        if y_main > 0.5 * float(self.size):
+            ys.append(float(y_main))
+        seen = set(ys)
+        for yx in getattr(cfg, "OFFRAMP_EXTRA_BRANCH_Y_PX", ()):
+            yf = float(np.clip(float(yx), 1.0, float(self.size) - 1.0))
+            if yf not in seen:
+                ys.append(yf)
+                seen.add(yf)
+        ys.sort(reverse=True)
+        return tuple(ys)
+
+    def offramp_num(self) -> int:
+        return len(self.offramp_branch_y_pxs())
+
+    def _offramp_bezier_controls_at(
+        self, y_branch: float
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+        """Bézier ``p0, p1, p2`` for one branch row ``y_branch`` on the main centerline."""
+        if not cfg.OFFRAMP_ENABLE:
             return None
-        y0 = float(np.clip(cfg.OFFRAMP_BRANCH_Y_FRAC, 0.0, 1.0)) * float(self.size)
-        if y0 <= 0.5 * float(self.size):
-            return None
+        y0 = float(np.clip(y_branch, 1.0, float(self.size) - 1.0))
         p0 = np.array([float(self.cs(y0)), y0], dtype=np.float64)
         dxdy = float(self.cs(y0, nu=1))
         t = np.array([-dxdy, -1.0], dtype=np.float64)
@@ -420,15 +447,24 @@ class DrivingWorld:
         L = float(cfg.OFFRAMP_TANGENT_CTRL_PX)
         p1 = p0 + L * t
         p2 = p0 + np.array(
-            [float(cfg.OFFRAMP_END_DX_PX), float(cfg.OFFRAMP_END_DY_PX)], dtype=np.float64
+            [float(cfg.OFFRAMP_END_DX_PX), float(cfg.OFFRAMP_END_DY_PX)],
+            dtype=np.float64,
         )
         return p0, p1, p2
 
-    def _offramp_centerline_points(self) -> np.ndarray | None:
-        """Dense integer polyline ``(N, 2)`` as ``(x, y)`` for the off-ramp, or ``None`` if disabled."""
-        ctrl = self._offramp_bezier_controls()
-        if ctrl is None:
+    def _offramp_bezier_controls(self) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+        """
+        Controls for ramp index ``0`` (legacy), or ``None`` if there are no branches.
+        """
+        branches = self.offramp_branch_y_pxs()
+        if not branches:
             return None
+        return self._offramp_bezier_controls_at(branches[0])
+
+    def _offramp_bezier_polyline_int(
+        self, ctrl: tuple[np.ndarray, np.ndarray, np.ndarray]
+    ) -> np.ndarray:
+        """Dense integer polyline for one Bézier."""
         p0, p1, p2 = ctrl
         n_bez = 96
         u = np.linspace(0.0, 1.0, n_bez, dtype=np.float64)
@@ -443,15 +479,18 @@ class DrivingWorld:
         return self._densify_polyline(pts.astype(np.float64), max(120, n_bez * 4))
 
     def offramp_bezier_evolution(
-        self, u: float
+        self, u: float, ramp_id: int = 0
     ) -> tuple[np.ndarray, tuple[float, float], float] | None:
         """
-        Position on the off-ramp, unit forward ``(fx, fy)`` in BEV (+x right, +y down), signed κ.
+        Position on off-ramp ``ramp_id``, unit forward ``(fx, fy)`` in BEV (+x right, +y down), signed κ.
 
         Curvature uses the standard parametric formula in image coordinates (matches ``generate_dataset``
         scaling when combined with main-road κ in one global ``max|κ|``).
         """
-        ctrl = self._offramp_bezier_controls()
+        branches = self.offramp_branch_y_pxs()
+        if ramp_id < 0 or ramp_id >= len(branches):
+            return None
+        ctrl = self._offramp_bezier_controls_at(branches[ramp_id])
         if ctrl is None:
             return None
         p0, p1, p2 = ctrl
@@ -476,6 +515,7 @@ class DrivingWorld:
         u_lo: float = 0.05,
         u_hi: float = 0.95,
         n_fine: int | None = None,
+        ramp_id: int = 0,
     ) -> np.ndarray:
         """
         ``n`` values of Bézier parameter ``u``, approximately **uniform in Euclidean arc length** between
@@ -483,8 +523,11 @@ class DrivingWorld:
 
         Matches the spirit of ``dataset_split._y_samples_uniform_arc_length`` for the main spline.
         """
-        ctrl = self._offramp_bezier_controls()
-        if ctrl is None or n <= 0:
+        branches = self.offramp_branch_y_pxs()
+        if ramp_id < 0 or ramp_id >= len(branches) or n <= 0:
+            return np.zeros((0,), dtype=np.float64)
+        ctrl = self._offramp_bezier_controls_at(branches[ramp_id])
+        if ctrl is None:
             return np.zeros((0,), dtype=np.float64)
         p0, p1, p2 = ctrl
         u_lo = float(np.clip(u_lo, 0.0, 1.0))
@@ -512,9 +555,13 @@ class DrivingWorld:
         u_hi: float = 0.95,
         *,
         n_fine: int = 2000,
+        ramp_id: int = 0,
     ) -> float:
-        """Pixel arc length along the off-ramp Bézier between ``u_lo`` and ``u_hi`` (dataset inset band)."""
-        ctrl = self._offramp_bezier_controls()
+        """Pixel arc length along one off-ramp Bézier between ``u_lo`` and ``u_hi`` (dataset inset band)."""
+        branches = self.offramp_branch_y_pxs()
+        if ramp_id < 0 or ramp_id >= len(branches):
+            return 0.0
+        ctrl = self._offramp_bezier_controls_at(branches[ramp_id])
         if ctrl is None:
             return 0.0
         u_lo = float(np.clip(u_lo, 0.0, 1.0))
@@ -526,26 +573,49 @@ class DrivingWorld:
         B = _bezier_quadratic_xy_batch(p0, p1, p2, u_fine)
         return float(np.sum(np.sqrt(np.sum(np.diff(B, axis=0) ** 2, axis=1))))
 
+    def offramp_total_arc_length_px(
+        self,
+        u_lo: float = 0.05,
+        u_hi: float = 0.95,
+        *,
+        n_fine: int = 2000,
+    ) -> float:
+        """Sum of inset-band arc lengths over all off-ramps (dataset spacing heuristic)."""
+        return float(
+            sum(
+                self.offramp_arc_length_px(
+                    u_lo, u_hi, n_fine=n_fine, ramp_id=rid
+                )
+                for rid in range(self.offramp_num())
+            )
+        )
+
     def offramp_max_abs_curvature(self, n: int = 128) -> float:
-        """Max ``|κ|`` along the Bézier (for ``SIM_YAW_RATE_GAIN`` vs dataset κ scaling)."""
-        if self._offramp_bezier_controls() is None:
+        """Max ``|κ|`` over all Béziers (for ``SIM_YAW_RATE_GAIN`` vs dataset κ scaling)."""
+        if self.offramp_num() <= 0:
             return 0.0
         ugrid = np.linspace(0.02, 0.98, int(n), dtype=np.float64)
         m = 0.0
-        for u in ugrid:
-            ev = self.offramp_bezier_evolution(float(u))
-            if ev is None:
-                continue
-            m = max(m, abs(float(ev[2])))
+        for rid in range(self.offramp_num()):
+            for u in ugrid:
+                ev = self.offramp_bezier_evolution(float(u), rid)
+                if ev is None:
+                    continue
+                m = max(m, abs(float(ev[2])))
         return float(m)
 
-    def offramp_step_arc_px(self, u: float, ds: float) -> tuple[float, float, float] | None:
+    def offramp_step_arc_px(
+        self, u: float, ds: float, ramp_id: int = 0
+    ) -> tuple[float, float, float] | None:
         """
         Advance the Bézier parameter by arc length ``ds`` (pixels in BEV).
 
         Returns ``(u_new, x, y)`` on the ramp centerline, or ``None`` if the off-ramp is disabled.
         """
-        ctrl = self._offramp_bezier_controls()
+        branches = self.offramp_branch_y_pxs()
+        if ramp_id < 0 or ramp_id >= len(branches):
+            return None
+        ctrl = self._offramp_bezier_controls_at(branches[ramp_id])
         if ctrl is None:
             return None
         p0, p1, p2 = ctrl
@@ -603,9 +673,15 @@ class DrivingWorld:
 
         self._draw_road_polyline(world, points, lane_px=lane_px, dash_len=dash_len, dash_gap=dash_gap)
 
-        off = self._offramp_centerline_points()
-        if off is not None and len(off) >= 2:
-            self._draw_road_polyline(world, off, lane_px=lane_px, dash_len=dash_len, dash_gap=dash_gap)
+        for yb in self.offramp_branch_y_pxs():
+            ctrl = self._offramp_bezier_controls_at(yb)
+            if ctrl is None:
+                continue
+            off = self._offramp_bezier_polyline_int(ctrl)
+            if len(off) >= 2:
+                self._draw_road_polyline(
+                    world, off, lane_px=lane_px, dash_len=dash_len, dash_gap=dash_gap
+                )
         self._draw_roadkill_obstacles(world)
         # Orientation: top of image is y=0 (small y); blue stripe marks that edge for debugging.
         cv2.line(

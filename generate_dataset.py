@@ -377,7 +377,7 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES, num_test=cfg.NUM_TEST_FRAMES):
         road_cs=dw.cs,
     )
 
-    L_ramp_px = float(dw.offramp_arc_length_px())
+    L_ramp_px = float(dw.offramp_total_arc_length_px())
     n_offramp_train, n_offramp_test = offramp_clean_counts_matching_main_spacing(
         L_ramp_px,
         int(num_train),
@@ -512,13 +512,18 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES, num_test=cfg.NUM_TEST_FRAMES):
         and n_offramp_train > 0
     ):
         n_or = int(n_offramp_train)
-        u_grid = (
-            dw.offramp_u_samples_uniform_arc_length(n_or)
-            if cfg.DATASET_SAMPLE_UNIFORM_ALONG_ROAD
-            else np.linspace(0.05, 0.95, n_or, dtype=np.float64)
-        )
-        for i, u in enumerate(u_grid):
-            ev = dw.offramp_bezier_evolution(float(u))
+        n_br = max(1, dw.offramp_num())
+        u_by_rid: list[np.ndarray] = []
+        for rid in range(n_br):
+            u_by_rid.append(
+                dw.offramp_u_samples_uniform_arc_length(n_or, ramp_id=rid)
+                if cfg.DATASET_SAMPLE_UNIFORM_ALONG_ROAD
+                else np.linspace(0.05, 0.95, n_or, dtype=np.float64)
+            )
+        for i in range(n_or):
+            rid = i % n_br
+            u = float(u_by_rid[rid][i])
+            ev = dw.offramp_bezier_evolution(u, rid)
             if ev is None:
                 continue
             B, (fx, fy), kappa = ev
@@ -614,13 +619,18 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES, num_test=cfg.NUM_TEST_FRAMES):
         and n_offramp_test > 0
     ):
         n_ot = int(n_offramp_test)
-        u_grid = (
-            dw.offramp_u_samples_uniform_arc_length(n_ot)
-            if cfg.DATASET_SAMPLE_UNIFORM_ALONG_ROAD
-            else np.linspace(0.05, 0.95, n_ot, dtype=np.float64)
-        )
-        for i, u in enumerate(u_grid):
-            ev = dw.offramp_bezier_evolution(float(u))
+        n_br = max(1, dw.offramp_num())
+        u_by_rid: list[np.ndarray] = []
+        for rid in range(n_br):
+            u_by_rid.append(
+                dw.offramp_u_samples_uniform_arc_length(n_ot, ramp_id=rid)
+                if cfg.DATASET_SAMPLE_UNIFORM_ALONG_ROAD
+                else np.linspace(0.05, 0.95, n_ot, dtype=np.float64)
+            )
+        for i in range(n_ot):
+            rid = i % n_br
+            u = float(u_by_rid[rid][i])
+            ev = dw.offramp_bezier_evolution(u, rid)
             if ev is None:
                 continue
             B, (fx, fy), kappa = ev

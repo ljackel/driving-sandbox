@@ -5,7 +5,7 @@ Open-loop behavioral-cloning roll-out on the bird's-eye map.
 advances **arc length** along the spline (decreasing ``y``), so the logged path cannot chord off the road.
 ``psi`` still integrates from the network (``psi += steering * SIM_YAW_RATE_GAIN * SIM_DT``) for the
 BC state / CSV. The camera uses the spline tangent at ``y`` and lateral offset vs row (right lane, or
-left-lane detour when ``ROADKILL_ENABLE`` (includes ``ROADKILL_EVAL_ONLY_OBSTACLE_Y_PX``; training data uses only ``ROADKILL_OBSTACLE_Y_PX``).
+left-lane detour when ``ROADKILL_ENABLE`` on the **main** road only (off-ramp poses skip detour, matching dataset off-ramp crops).
 
 **Control:** The network predicts steering from the crop; ``train.py`` supervises **output channel 0``.
 With projection on, steering does **not** translate the centerline reference with ``cos/sin(psi)``—that
@@ -71,7 +71,7 @@ from driving_model import DrivingNet
 from generate_world import DrivingWorld, lateral_offset_px_avoid_roadkill
 
 # Centerline ``(x,y)``, integrated ``psi``, whether pose is on the off-ramp, Bézier ``u`` (else0).
-SimPathPoint = tuple[float, float, float, bool, float]
+SimPathPoint = tuple[float, float, float, bool, float, int]
 
 
 def _sim_path_point(
@@ -81,8 +81,16 @@ def _sim_path_point(
     *,
     on_ramp: bool = False,
     u_ramp: float = 0.0,
+    ramp_id: int = 0,
 ) -> SimPathPoint:
-    return (float(x), float(y), float(psi), bool(on_ramp), float(u_ramp))
+    return (
+        float(x),
+        float(y),
+        float(psi),
+        bool(on_ramp),
+        float(u_ramp),
+        int(ramp_id),
+    )
 
 
 def _project_root() -> str:
@@ -293,8 +301,10 @@ def _ego_lateral_offset_px_at_y(
     world_bgr: np.ndarray | None = None,
     x_center: float | None = None,
     psi: float | None = None,
+    *,
+    on_ramp: bool = False,
 ) -> float:
-    """Camera/ego offset from centerline (px); mirrors training when pose/world are passed for visibility gating."""
+    """Camera/ego offset from centerline (px); roadkill detour applies only on the main road."""
     base = float(cfg.SIM_EGO_LATERAL_OFFSET_M) * float(dw.px_per_m)
     return lateral_offset_px_avoid_roadkill(
         float(y),
@@ -304,6 +314,7 @@ def _ego_lateral_offset_px_at_y(
         dw=dw,
         x_center=x_center,
         psi=psi,
+        on_main_road=not on_ramp,
     )
 
 
@@ -355,18 +366,23 @@ def _draw_offramp_train_sampling_bars_on_bev(
     """
     Draw orange bars where ``generate_dataset`` places clean off-ramp train crops (``u`` in ``[0.05, 0.95]``).
     """
-    if n_ramp_train_frames <= 0 or dw._offramp_bezier_controls() is None:
+    if n_ramp_train_frames <= 0 or dw.offramp_num() <= 0:
         return
     bar_half = max(8.0, 0.35 * float(cfg.LANE_WIDTH_METERS * dw.px_per_m))
     orange_bgr = (0, 200, 255)
     n_r = int(n_ramp_train_frames)
-    u_grid = (
-        dw.offramp_u_samples_uniform_arc_length(n_r)
-        if cfg.DATASET_SAMPLE_UNIFORM_ALONG_ROAD
-        else np.linspace(0.05, 0.95, n_r, dtype=np.float64)
-    )
-    for u in u_grid:
-        ev = dw.offramp_bezier_evolution(float(u))
+    n_br = max(1, dw.offramp_num())
+    u_by_rid: list[np.ndarray] = []
+    for rid in range(n_br):
+        u_by_rid.append(
+            dw.offramp_u_samples_uniform_arc_length(n_r, ramp_id=rid)
+            if cfg.DATASET_SAMPLE_UNIFORM_ALONG_ROAD
+            else np.linspace(0.05, 0.95, n_r, dtype=np.float64)
+        )
+    for i in range(n_r):
+        rid = i % n_br
+        u = float(u_by_rid[rid][i])
+        ev = dw.offramp_bezier_evolution(u, rid)
         if ev is None:
             continue
         B, (fx, fy), _ = ev
@@ -525,10 +541,15 @@ def _bev_realtime_frame(
         n = len(path)
         qs = np.empty((n, 2), dtype=np.float32)
         for i, p in enumerate(path):
-            xc, yc, _psi, on_r, ur = p
-            psi_d = _path_point_psi_draw(dw, xc, yc, on_r, ur)
+            xc, yc, _psi, on_r, ur, rid = p
+            psi_d = _path_point_psi_draw(dw, xc, yc, on_r, ur, rid)
             lat_i = _ego_lateral_offset_px_at_y(
-                dw, float(yc), world_bgr, float(xc), float(psi_d)
+                dw,
+                float(yc),
+                world_bgr,
+                float(xc),
+                float(psi_d),
+                on_ramp=bool(on_r),
             )
             qx, qy = _right_lane_overlay_xy(float(xc), float(yc), psi_d, lat_i)
             qs[i, 0] = qx
@@ -865,10 +886,11 @@ def _path_point_psi_draw(
     y: float,
     on_ramp: bool,
     u_ramp: float,
+    ramp_id: int = 0,
 ) -> float:
     """Road tangent at a logged centerline pose (matches live ``psi_draw`` / camera heading)."""
     if on_ramp:
-        ev = dw.offramp_bezier_evolution(float(u_ramp))
+        ev = dw.offramp_bezier_evolution(float(u_ramp), int(ramp_id))
         if ev is None:
             return float(initial_heading_road_aligned(dw.cs, y))
         _, (fx, fy), _ = ev
@@ -940,36 +962,39 @@ def _snap_ramp_right_lane_nearest(
     mx: float,
     my: float,
     world_bgr: np.ndarray,
-) -> tuple[float, float, float, float, float] | None:
+) -> tuple[float, float, float, float, float, int] | None:
     """
-    Closest off-ramp **right-lane** footprint to ``(mx, my)``.
+    Closest off-ramp **right-lane** footprint to ``(mx, my)`` over all ramp branches.
 
-    Returns ``(u, x_centerline, y, psi_road, d2)`` or ``None``.
+    Returns ``(u, x_centerline, y, psi_road, d2, ramp_id)`` or ``None``.
     """
-    if dw._offramp_bezier_controls() is None:
+    if dw.offramp_num() <= 0:
         return None
     n = 220
     us = np.linspace(0.0, 1.0, n, dtype=np.float64)
     best_d2 = 1e30
-    best: tuple[float, float, float, float] | None = None
-    for u in us:
-        u = float(u)
-        ev = dw.offramp_bezier_evolution(u)
-        if ev is None:
-            continue
-        B, (fx, fy), _ = ev
-        px, py = float(B[0]), float(B[1])
-        pr = float(np.arctan2(fy, fx))
-        lat = _ego_lateral_offset_px_at_y(dw, py, world_bgr, px, pr)
-        qx, qy = _right_lane_overlay_xy(px, py, pr, lat)
-        d2 = (qx - mx) ** 2 + (qy - my) ** 2
-        if d2 < best_d2:
-            best_d2 = float(d2)
-            best = (u, px, py, pr)
+    best: tuple[float, float, float, float, int] | None = None
+    for rid in range(dw.offramp_num()):
+        for u in us:
+            u = float(u)
+            ev = dw.offramp_bezier_evolution(u, rid)
+            if ev is None:
+                continue
+            B, (fx, fy), _ = ev
+            px, py = float(B[0]), float(B[1])
+            pr = float(np.arctan2(fy, fx))
+            lat = _ego_lateral_offset_px_at_y(
+                dw, py, world_bgr, px, pr, on_ramp=True
+            )
+            qx, qy = _right_lane_overlay_xy(px, py, pr, lat)
+            d2 = (qx - mx) ** 2 + (qy - my) ** 2
+            if d2 < best_d2:
+                best_d2 = float(d2)
+                best = (u, px, py, pr, rid)
     if best is None:
         return None
-    u_b, px_b, py_b, pr_b = best
-    return u_b, px_b, py_b, pr_b, best_d2
+    u_b, px_b, py_b, pr_b, rid_b = best
+    return u_b, px_b, py_b, pr_b, best_d2, rid_b
 
 
 def _bev_reloc_snap_validated(
@@ -985,22 +1010,24 @@ def _bev_reloc_snap_validated(
     Snap a BEV click to the nearest valid drivable pose (main and/or ramp), preferring smaller
     screen-space error. ``psi`` is road tangent; ``get_view_from_pose`` must succeed.
     """
-    candidates: list[tuple[float, float, float, float, bool, float]] = []
+    candidates: list[
+        tuple[float, float, float, float, bool, float, int]
+    ] = []
     main = _snap_main_right_lane_nearest(dw, mx, my, h, margin, world_bgr)
     if main is not None:
         xc, y, psi_m, d2m = main
-        candidates.append((d2m, xc, y, psi_m, False, 0.0))
+        candidates.append((d2m, xc, y, psi_m, False, 0.0, 0))
     if follow_ramp_geom and dw._offramp_bezier_controls() is not None:
         ramp = _snap_ramp_right_lane_nearest(dw, mx, my, world_bgr)
         if ramp is not None:
-            u_r, rx, ry, psi_r, d2r = ramp
-            candidates.append((d2r, rx, ry, psi_r, True, u_r))
+            u_r, rx, ry, psi_r, d2r, rid_r = ramp
+            candidates.append((d2r, rx, ry, psi_r, True, u_r, rid_r))
     if not candidates:
         return None
     candidates.sort(key=lambda t: t[0])
-    for _d2, x, y, psi_road, on_r, u_r in candidates:
+    for _d2, x, y, psi_road, on_r, u_r, ramp_id in candidates:
         if on_r:
-            ev = dw.offramp_bezier_evolution(float(u_r))
+            ev = dw.offramp_bezier_evolution(float(u_r), int(ramp_id))
             if ev is None:
                 continue
             _, (fx, fy), _ = ev
@@ -1014,7 +1041,12 @@ def _bev_reloc_snap_validated(
                 float(y),
                 psi_cam,
                 _ego_lateral_offset_px_at_y(
-                    dw, float(y), world_bgr, float(x), float(psi_cam)
+                    dw,
+                    float(y),
+                    world_bgr,
+                    float(x),
+                    float(psi_cam),
+                    on_ramp=bool(on_r),
                 ),
             )
             is None
@@ -1026,6 +1058,7 @@ def _bev_reloc_snap_validated(
             "psi": psi_cam,
             "on_ramp": bool(on_r),
             "u_ramp": float(u_r),
+            "ramp_id": int(ramp_id),
         }
     return None
 
@@ -1163,26 +1196,35 @@ def run_simulation() -> tuple[
     x, y = x0, y0
     base_step_dist_px = cfg.SIM_SPEED_M_S * cfg.SIM_DT * px_per_m
 
-    off_ok = dw._offramp_bezier_controls() is not None
+    off_ok = dw.offramp_num() > 0
     follow_ramp_geom = (
         cfg.SIM_TAKE_OFFRAMP
         and cfg.OFFRAMP_ENABLE
         and off_ok
         and cfg.SIM_PROJECT_REF_ONTO_MAIN_ROAD
     )
-    y_branch = float(np.clip(cfg.OFFRAMP_BRANCH_Y_FRAC, 0.0, 1.0)) * float(h)
+    off_branch_ys = list(dw.offramp_branch_y_pxs())
     on_ramp = False
     u_ramp = 0.0
-    if follow_ramp_geom and float(y0) <= y_branch + 1e-9:
-        on_ramp = True
-        u_ramp = 0.0
-        ev_start = dw.offramp_bezier_evolution(0.0)
-        if ev_start is not None:
-            B0, _, _ = ev_start
-            x0 = float(B0[0])
-            y0 = float(B0[1])
-            x, y = x0, y0
-            path[0] = _sim_path_point(x0, y0, psi, on_ramp=True, u_ramp=0.0)
+    ramp_id = 0
+    if follow_ramp_geom and off_branch_ys:
+        start_rid = -1
+        for rid, yb in enumerate(off_branch_ys):
+            if float(y0) <= yb + 1e-9:
+                start_rid = rid
+        if start_rid >= 0:
+            on_ramp = True
+            u_ramp = 0.0
+            ramp_id = start_rid
+            ev_start = dw.offramp_bezier_evolution(0.0, ramp_id)
+            if ev_start is not None:
+                B0, _, _ = ev_start
+                x0 = float(B0[0])
+                y0 = float(B0[1])
+                x, y = x0, y0
+                path[0] = _sim_path_point(
+                    x0, y0, psi, on_ramp=True, u_ramp=0.0, ramp_id=ramp_id
+                )
 
     rt_window = False
     rt_driver_window = False
@@ -1235,7 +1277,7 @@ def run_simulation() -> tuple[
             rt_ui["sim_step"] = sim_i
             step_dist_px = base_step_dist_px * float(rt_ui.get("speed_scale", 1.0))
             if on_ramp:
-                ev_pose = dw.offramp_bezier_evolution(u_ramp)
+                ev_pose = dw.offramp_bezier_evolution(u_ramp, ramp_id)
                 if ev_pose is None:
                     break
                 _, (fx, fy), _ = ev_pose
@@ -1248,7 +1290,12 @@ def run_simulation() -> tuple[
                 y,
                 psi_cam,
                 _ego_lateral_offset_px_at_y(
-                    dw, float(y), world, float(x), float(psi_cam)
+                    dw,
+                    float(y),
+                    world,
+                    float(x),
+                    float(psi_cam),
+                    on_ramp=on_ramp,
                 ),
             )
             if view is None:
@@ -1282,7 +1329,9 @@ def run_simulation() -> tuple[
             psi += steering * cfg.SIM_YAW_RATE_GAIN * cfg.SIM_DT
             if cfg.SIM_PROJECT_REF_ONTO_MAIN_ROAD:
                 if follow_ramp_geom and on_ramp:
-                    step_r = dw.offramp_step_arc_px(u_ramp, step_dist_px)
+                    step_r = dw.offramp_step_arc_px(
+                        u_ramp, step_dist_px, ramp_id
+                    )
                     if step_r is None:
                         break
                     u_ramp, x, y = step_r
@@ -1291,14 +1340,17 @@ def run_simulation() -> tuple[
                     x, y = _advance_main_centerline_arc_px(
                         dw, y, step_dist_px, margin=margin, h=h
                     )
-                    if y_before > y_branch + 1e-9 and float(y) <= y_branch + 1e-9:
-                        on_ramp = True
-                        u_ramp = 0.0
-                        ev_br = dw.offramp_bezier_evolution(0.0)
-                        if ev_br is None:
+                    for rid, yb in enumerate(off_branch_ys):
+                        if y_before > yb + 1e-9 and float(y) <= yb + 1e-9:
+                            on_ramp = True
+                            u_ramp = 0.0
+                            ramp_id = rid
+                            ev_br = dw.offramp_bezier_evolution(0.0, ramp_id)
+                            if ev_br is None:
+                                break
+                            Bb, _, _ = ev_br
+                            x, y = float(Bb[0]), float(Bb[1])
                             break
-                        Bb, _, _ = ev_br
-                        x, y = float(Bb[0]), float(Bb[1])
                 else:
                     x, y = _advance_main_centerline_arc_px(
                         dw, y, step_dist_px, margin=margin, h=h
@@ -1309,7 +1361,7 @@ def run_simulation() -> tuple[
             wb = float(cfg.SIM_BLEND_PSI_TO_MAIN_ROAD)
             if wb > 0.0:
                 if on_ramp:
-                    evb = dw.offramp_bezier_evolution(u_ramp)
+                    evb = dw.offramp_bezier_evolution(u_ramp, ramp_id)
                     if evb is not None:
                         _, (bx, by), _ = evb
                         psi = _blend_psi_toward(
@@ -1326,11 +1378,12 @@ def run_simulation() -> tuple[
                     float(psi),
                     on_ramp=on_ramp,
                     u_ramp=u_ramp,
+                    ramp_id=ramp_id,
                 )
             )
     
             if on_ramp:
-                ev_draw = dw.offramp_bezier_evolution(u_ramp)
+                ev_draw = dw.offramp_bezier_evolution(u_ramp, ramp_id)
                 if ev_draw is not None:
                     _, (fxd, fyd), _ = ev_draw
                     psi_draw = float(np.arctan2(fyd, fxd))
@@ -1347,7 +1400,12 @@ def run_simulation() -> tuple[
                 "follow_ramp_geom": follow_ramp_geom,
             }
             lat_hit = _ego_lateral_offset_px_at_y(
-                dw, float(y), world, float(x), float(psi_draw)
+                dw,
+                float(y),
+                world,
+                float(x),
+                float(psi_draw),
+                on_ramp=on_ramp,
             )
             qx_hit, qy_hit = _right_lane_overlay_xy(
                 float(x), float(y), float(psi_draw), lat_hit
@@ -1425,6 +1483,7 @@ def run_simulation() -> tuple[
                             psi = float(rp["psi"])
                             on_ramp = bool(rp["on_ramp"])
                             u_ramp = float(rp["u_ramp"])
+                            ramp_id = int(rp.get("ramp_id", 0))
                             psi_draw = float(rp["psi"])
                             path.clear()
                             path.append(
@@ -1434,6 +1493,7 @@ def run_simulation() -> tuple[
                                     psi,
                                     on_ramp=on_ramp,
                                     u_ramp=u_ramp,
+                                    ramp_id=ramp_id,
                                 )
                             )
                             lat_hit = _ego_lateral_offset_px_at_y(
@@ -1442,6 +1502,7 @@ def run_simulation() -> tuple[
                                 world,
                                 float(x),
                                 float(psi_draw),
+                                on_ramp=on_ramp,
                             )
                             qx_hit, qy_hit = _right_lane_overlay_xy(
                                 float(x), float(y), float(psi_draw), lat_hit
@@ -1498,6 +1559,7 @@ def run_simulation() -> tuple[
                                 world,
                                 disp_x,
                                 disp_psi_draw,
+                                on_ramp=bool(prv.get("on_ramp", False)),
                             )
                         if fr is not None:
                             bh = (
@@ -1620,7 +1682,7 @@ def run_simulation() -> tuple[
 
     if video_writer is not None:
         if on_ramp:
-            ev_fin = dw.offramp_bezier_evolution(u_ramp)
+            ev_fin = dw.offramp_bezier_evolution(u_ramp, ramp_id)
             if ev_fin is not None:
                 _, (ex, ey), _ = ev_fin
                 psi_end = float(np.arctan2(ey, ex))
@@ -1634,7 +1696,12 @@ def run_simulation() -> tuple[
             y,
             psi_end,
             _ego_lateral_offset_px_at_y(
-                dw, float(y), world, float(x), float(psi_end)
+                dw,
+                float(y),
+                world,
+                float(x),
+                float(psi_end),
+                on_ramp=on_ramp,
             ),
         )
         if view_end is not None:
@@ -1671,7 +1738,7 @@ def main() -> None:
         road_cs=dw_overlay.cs,
     )
     _draw_train_sampling_bars_on_bev(vis, dw_overlay, train_y_rows)
-    L_ramp_px = float(dw_overlay.offramp_arc_length_px())
+    L_ramp_px = float(dw_overlay.offramp_total_arc_length_px())
     n_offramp_train_vis, _ = offramp_clean_counts_matching_main_spacing(
         L_ramp_px,
         int(cfg.NUM_TRAIN_FRAMES),
@@ -1697,16 +1764,26 @@ def main() -> None:
         )
     poly_xy: list[list[float]] = []
     for i in range(len(path) - 1):
-        x_a, y_a, _, on_a, u_a = path[i]
-        x_b, y_b, _, on_b, u_b = path[i + 1]
-        ps_a = _path_point_psi_draw(dw_overlay, x_a, y_a, on_a, u_a)
-        ps_b = _path_point_psi_draw(dw_overlay, x_b, y_b, on_b, u_b)
+        x_a, y_a, _, on_a, u_a, rid_a = path[i]
+        x_b, y_b, _, on_b, u_b, rid_b = path[i + 1]
+        ps_a = _path_point_psi_draw(dw_overlay, x_a, y_a, on_a, u_a, rid_a)
+        ps_b = _path_point_psi_draw(dw_overlay, x_b, y_b, on_b, u_b, rid_b)
         lat_m = 0.5 * (
             _ego_lateral_offset_px_at_y(
-                dw_overlay, float(y_a), vis, float(x_a), float(ps_a)
+                dw_overlay,
+                float(y_a),
+                vis,
+                float(x_a),
+                float(ps_a),
+                on_ramp=bool(on_a),
             )
             + _ego_lateral_offset_px_at_y(
-                dw_overlay, float(y_b), vis, float(x_b), float(ps_b)
+                dw_overlay,
+                float(y_b),
+                vis,
+                float(x_b),
+                float(ps_b),
+                on_ramp=bool(on_b),
             )
         )
         seg = _right_lane_polyline_xy_chord(
@@ -1721,16 +1798,21 @@ def main() -> None:
         arr_i = np.round(arr).astype(np.int32).reshape(-1, 1, 2)
         cv2.polylines(vis, [arr_i], False, (0, 0, 255), 2, cv2.LINE_AA)
     if len(path) > 0:
-        x0, y0, _, on0, u0 = path[0]
-        xe, ye, _, one, ue = path[-1]
-        ps0 = _path_point_psi_draw(dw_overlay, x0, y0, on0, u0)
-        pse = _path_point_psi_draw(dw_overlay, xe, ye, one, ue)
+        x0, y0, _, on0, u0, rid0 = path[0]
+        xe, ye, _, one, ue, ride = path[-1]
+        ps0 = _path_point_psi_draw(dw_overlay, x0, y0, on0, u0, rid0)
+        pse = _path_point_psi_draw(dw_overlay, xe, ye, one, ue, ride)
         sq = _right_lane_overlay_xy(
             x0,
             y0,
             ps0,
             _ego_lateral_offset_px_at_y(
-                dw_overlay, float(y0), vis, float(x0), float(ps0)
+                dw_overlay,
+                float(y0),
+                vis,
+                float(x0),
+                float(ps0),
+                on_ramp=bool(on0),
             ),
         )
         eq = _right_lane_overlay_xy(
@@ -1738,7 +1820,12 @@ def main() -> None:
             ye,
             pse,
             _ego_lateral_offset_px_at_y(
-                dw_overlay, float(ye), vis, float(xe), float(pse)
+                dw_overlay,
+                float(ye),
+                vis,
+                float(xe),
+                float(pse),
+                on_ramp=bool(one),
             ),
         )
         _draw_bev_ego_car_icon(
