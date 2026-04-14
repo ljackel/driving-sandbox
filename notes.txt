@@ -19,3 +19,5 @@ now double curviness again. still good.
 
 drives well even when train data is only on the lower half of the map/
 
+I was sampling at even y intervals. now I am sampling at even distances along the road. Now  there is now such good lane keep.  will add more training data.
+

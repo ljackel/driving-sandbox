@@ -109,8 +109,8 @@ PERSPECTIVE_SRC_MARGIN_PX = 12.0
 # BEV ``y`` increases downward; geography split vs mix is ``DATASET_MIX_TRAIN_TEST_GEOGRAPHY`` (switches above).
 DATASET_MAP_MARGIN = 80
 # Clean grid size per split; with aligned perturbations on, total files = 2 × this (half clean, half perturbed).
-NUM_TRAIN_FRAMES = 100
-NUM_TEST_FRAMES = 100
+NUM_TRAIN_FRAMES = 200
+NUM_TEST_FRAMES = 200
 # Camera lateral (m) = LANE_WIDTH_METERS × fraction: from spline (lane divider) along driver's-right
 # toward the outer edge. 0.5 = geometric center of the right lane; lower if the view hugs the outer edge.
 DATASET_RIGHT_LANE_LATERAL_FRAC = 0.45
