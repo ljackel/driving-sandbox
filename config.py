@@ -71,11 +71,11 @@ PERSPECTIVE_INPUT_BOTTOM_HALF_ONLY = False
 # ``NUM_TRAIN_FRAMES + NUM_TEST_FRAMES`` positions are equally spaced along the full span
 # ``[margin, size - margin]`` and split at random (``DATASET_SEED``), so both train and test mix
 # top and bottom road geometry. Perturbed duplicate frames: ``DATASET_PERTURBATIONS_ENABLE`` plus ``PERTURB_*``.
-DATASET_MIX_TRAIN_TEST_GEOGRAPHY = True
+DATASET_MIX_TRAIN_TEST_GEOGRAPHY = False
 DATASET_MAP_MARGIN = 80
 # Clean grid size per split; with aligned perturbations on, total files = 2 × this (half clean, half perturbed).
-NUM_TRAIN_FRAMES = 21
-NUM_TEST_FRAMES = 21
+NUM_TRAIN_FRAMES = 100
+NUM_TEST_FRAMES = 100
 # Camera lateral (m) = LANE_WIDTH_METERS × fraction: from spline (lane divider) along driver's-right
 # toward the outer edge. 0.5 = geometric center of the right lane; lower if the view hugs the outer edge.
 DATASET_RIGHT_LANE_LATERAL_FRAC = 0.45
@@ -176,7 +176,7 @@ BATCH_SIZE = 16
 # Adam: ``1e-3`` often stalls near predicting mean steering; ``3e-4`` (or ``1e-4``) fits this task reliably.
 LEARNING_RATE = 3e-4
 # Increase when the dataset grows; ``CHECKPOINT_MIN_EPOCH`` delays best-metric checkpoints.
-EPOCHS = 100
+EPOCHS = 200
 # Used by ``reproducibility.set_global_seed`` and train ``DataLoader`` shuffle generator.
 TRAIN_SEED = 42
 # First 1..(N-1) epochs are warmup: no best-metric tracking, checkpoints, or best-loss coloring.
