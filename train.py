@@ -9,6 +9,7 @@ import json
 import math
 import os
 import shutil
+import time
 from datetime import datetime
 
 import cv2
@@ -133,6 +134,7 @@ running_min_test_loss = float("inf")
 running_min_test_epoch: int | None = None
 checkpoint_fallback_last_epoch = False
 
+_train_wall_start = time.perf_counter()
 for epoch in range(epochs):
     train_sse = 0.0
     train_n = 0
@@ -228,6 +230,13 @@ for epoch in range(epochs):
         row["epoch_with_lowest_test_so_far"] = running_min_test_epoch
     metrics.append(row)
 
+_train_wall_sec = time.perf_counter() - _train_wall_start
+_per_epoch_sec = _train_wall_sec / float(epochs) if epochs > 0 else 0.0
+print(
+    f"Training time: {_train_wall_sec:.2f}s ({_train_wall_sec / 60.0:.2f} min); "
+    f"{_per_epoch_sec:.2f}s per epoch ({epochs} epochs)."
+)
+
 run_weights = os.path.join(run_dir, cfg.CHECKPOINT_FILENAME)
 data_checkpoint = os.path.join(cfg.DATA_DIR, cfg.CHECKPOINT_FILENAME)
 os.makedirs(cfg.DATA_DIR, exist_ok=True)
@@ -255,6 +264,8 @@ training_log = {
     "train_samples": len(dataset),
     "test_samples": len(test_dataset),
     "epochs": epochs,
+    "train_wall_time_sec": float(_train_wall_sec),
+    "train_time_per_epoch_sec": float(_per_epoch_sec),
     "batch_size": batch_size,
     "learning_rate": learning_rate,
     "train_seed": cfg.TRAIN_SEED,
