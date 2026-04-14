@@ -30,6 +30,7 @@ from reproducibility import set_global_seed
 set_global_seed(cfg.TRAIN_SEED)
 
 from driving_model import DrivingNet
+from run_architecture import write_architecture_artifacts
 
 _RED = "\033[31m"
 _GRN = "\033[32m"
@@ -98,6 +99,11 @@ _root = os.path.dirname(os.path.abspath(__file__))
 _run_stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 run_dir = os.path.join(_root, cfg.RUNS_DIR, _run_stamp)
 os.makedirs(run_dir, exist_ok=True)
+write_architecture_artifacts(run_dir, model)
+print(
+    f"Wrote architecture diagram: {os.path.join(run_dir, 'architecture.md')!r} "
+    f"and {os.path.join(run_dir, 'architecture.png')!r}"
+)
 
 # 5. The Training Loop
 print(
