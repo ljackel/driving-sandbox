@@ -29,7 +29,8 @@ Windows are tiled
 left-to-right (BEV then driver) using ``SIM_REALTIME_WINDOW_*`` so they do not overlap.
 The BEV view draws a **speed bar** at the bottom (drag with the mouse; see ``SIM_REALTIME_SPEED_*`` in config)
 that scales distance per simulation step. Use ``SIM_REALTIME_STEP_PAUSE_MS`` (and ``SIM_REALTIME_BEV_WAIT_MS``)
-to slow the live display.
+to slow the live display (set pause to ``0`` and turn off BEV/driver windows or ``SIM_FP_VIDEO_ENABLE`` for headless speed).
+With CUDA, ``SIM_CUDNN_BENCHMARK`` and optional ``SIM_TORCH_COMPILE`` reduce per-step inference cost.
 
 **Input crop:** ``PERSPECTIVE_INPUT_BOTTOM_HALF_ONLY`` matches ``train.py`` / ``evaluate_test.py`` (bottom
 half of the warp, then resize to ``CAMERA_IMAGE_SIZE``).
@@ -1129,6 +1130,21 @@ def run_simulation() -> tuple[
     model = DrivingNet().to(device)
     model.load_state_dict(torch.load(ckpt, map_location=device))
     model.eval()
+    if device.type == "cuda" and bool(
+        getattr(cfg, "SIM_CUDNN_BENCHMARK", True)
+    ):
+        torch.backends.cudnn.benchmark = True
+    if bool(getattr(cfg, "SIM_TORCH_COMPILE", False)) and hasattr(
+        torch, "compile"
+    ):
+        try:
+            model = torch.compile(model)  # type: ignore[assignment]
+            print("torch.compile enabled for DrivingNet (warmup may take a few steps).")
+        except Exception as exc:
+            print(
+                f"Warning: torch.compile skipped ({type(exc).__name__}: {exc}).",
+                file=sys.stderr,
+            )
     n_params = sum(int(p.numel()) for p in model.parameters())
     cls = type(model)
     print(
@@ -1194,6 +1210,10 @@ def run_simulation() -> tuple[
     }
     user_quit_rt = False
     interrupt_rt = [False]
+    take_intent = 1.0 if cfg.SIM_TAKE_OFFRAMP else 0.0
+    take_t = torch.tensor(
+        [[take_intent]], device=device, dtype=torch.float32
+    )
 
     def _sim_sigint(_signum: int, _frame: object) -> None:
         interrupt_rt[0] = True
@@ -1254,10 +1274,8 @@ def run_simulation() -> tuple[
                 if video_writer is not None:
                     video_writer.write(vframe)
     
-            with torch.no_grad():
+            with torch.inference_mode():
                 inp = preprocess_bgr_for_model(view, device)
-                intent = 1.0 if cfg.SIM_TAKE_OFFRAMP else 0.0
-                take_t = torch.tensor([[intent]], device=device, dtype=inp.dtype)
                 steering = float(model(inp, take_t)[0, 0].item())
     
             # Gain matches kappa_max * speed * px_per_m (see config._compute_sim_yaw_rate_gain).
@@ -1346,9 +1364,7 @@ def run_simulation() -> tuple[
                         x,
                         y,
                         psi_draw,
-                        _ego_lateral_offset_px_at_y(
-                            dw, float(y), world, float(x), float(psi_draw)
-                        ),
+                        lat_hit,
                     )
                     if view_live is None:
                         break
@@ -1392,9 +1408,7 @@ def run_simulation() -> tuple[
                             x,
                             y,
                             psi_draw,
-                            _ego_lateral_offset_px_at_y(
-                                dw, float(y), world, float(x), float(psi_draw)
-                            ),
+                            lat_hit,
                             extra_hint=bev_hint,
                         )
                         _rt_draw_speed_slider(fr, rt_ui)
@@ -1472,9 +1486,7 @@ def run_simulation() -> tuple[
                         rt_ui["rt_sim_paused"] = paused
                         disp_x, disp_y = float(x), float(y)
                         disp_psi_draw = float(psi_draw)
-                        disp_lat = _ego_lateral_offset_px_at_y(
-                            dw, float(y), world, float(x), float(psi_draw)
-                        )
+                        disp_lat = lat_hit
                         prv = rt_ui.get("reloc_preview_pose")
                         if paused and isinstance(prv, dict) and rt_ui.get("ego_drag"):
                             disp_x = float(prv["x"])

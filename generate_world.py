@@ -33,15 +33,71 @@ def _roadkill_obstacle_y_rows_all() -> tuple[float, ...]:
     return _roadkill_obstacle_y_rows_training() + _roadkill_obstacle_y_rows_eval_only()
 
 
+def _raised_cosine01(t: float) -> float:
+    """Hann ease 0→1; zero slope at both ends (gentler lane-change than polynomial ease)."""
+    t = float(np.clip(t, 0.0, 1.0))
+    return float(0.5 - 0.5 * np.cos(np.pi * t))
+
+
+def _splat_visibility_soft_weight(
+    uv: tuple[float, float],
+    cam_s: float,
+    bottom_half_only: bool,
+) -> float:
+    """
+    Fade detour in as the hazard occupies more of the forward view (avoids a one-frame step when
+    ``ROADKILL_DETOUR_ONLY_WHEN_VISIBLE`` is on). ``v`` increases downward; near-ego is larger ``v``.
+    """
+    u, v = float(uv[0]), float(uv[1])
+    m = 0.06 * cam_s
+    if u < -m or u > cam_s + m or v < -m or v > cam_s + m:
+        return 0.0
+    if bottom_half_only and v < 0.5 * cam_s:
+        return 0.0
+    if bottom_half_only:
+        v0, v1 = 0.5 * cam_s, cam_s
+    else:
+        v0, v1 = 0.1 * cam_s, cam_s
+    denom = max(v1 - v0, 1e-6)
+    v_frac = float(getattr(cfg, "ROADKILL_VIS_SPLAT_SOFT_RAMP_FRAC", 1.28))
+    t_v = (v - v0) / max(v_frac * denom, 1e-6)
+    f_v = _raised_cosine01(t_v)
+    u_mid = 0.5 * cam_s
+    half = 0.5 * cam_s
+    t_u = 1.0 - abs(u - u_mid) / half
+    f_u = _raised_cosine01(t_u)
+    return float(np.clip(f_v * f_u, 0.0, 1.0))
+
+
+def _roadkill_exit_ramp_length_px() -> float:
+    """BEV ``y`` span to merge back to the right lane: ``ROADKILL_DETOUR_EXIT_CAR_LENGTHS`` × ego length (m) → px."""
+    px_per_m = float(cfg.WORLD_IMAGE_SIZE) / float(cfg.WORLD_METERS)
+    car_m = float(cfg.SIM_BEV_EGO_CAR_LENGTH_M)
+    n = float(cfg.ROADKILL_DETOUR_EXIT_CAR_LENGTHS)
+    return max(1e-3, n * car_m * px_per_m)
+
+
+def _roadkill_approach_merge_before_core_px() -> float:
+    """Last stretch before the core: blend visibility-driven ``w`` up to 1.0 (car lengths × ego, map px)."""
+    px_per_m = float(cfg.WORLD_IMAGE_SIZE) / float(cfg.WORLD_METERS)
+    car_m = float(cfg.SIM_BEV_EGO_CAR_LENGTH_M)
+    n = float(cfg.ROADKILL_APPROACH_CORE_MERGE_CAR_LENGTHS)
+    return max(1e-3, n * car_m * px_per_m)
+
+
 def _roadkill_left_lane_blend_weight_at_row(y_row: float, y0: float) -> float:
     """
-    Blend 0..1 for a **single** obstacle centered at ``y0`` (same geometry as legacy one-obstacle case).
+    Blend 0..1 for a **single** obstacle centered at ``y0``.
+
+    Approach ramp uses ``SIM_SPEED_M_S`` and ``ROADKILL_DETOUR_BLEND_APPROACH_S`` (time → distance in ``y``).
+    Exit ramp length is ``ROADKILL_DETOUR_EXIT_CAR_LENGTHS`` × ``SIM_BEV_EGO_CAR_LENGTH_M`` on the map scale.
     """
     hc = float(cfg.ROADKILL_DETOUR_CORE_HALF_PX)
-    bl_in = float(cfg.ROADKILL_DETOUR_BLEND_PX)
-    bl_out = float(cfg.ROADKILL_DETOUR_BLEND_EXIT_PX)
     px_per_m = float(cfg.WORLD_IMAGE_SIZE) / float(cfg.WORLD_METERS)
-    lead_px = float(cfg.SIM_SPEED_M_S) * float(cfg.ROADKILL_APPROACH_LEAD_S) * px_per_m
+    v = float(cfg.SIM_SPEED_M_S)
+    bl_in = v * float(cfg.ROADKILL_DETOUR_BLEND_APPROACH_S) * px_per_m
+    bl_out = _roadkill_exit_ramp_length_px()
+    lead_px = v * float(cfg.ROADKILL_APPROACH_LEAD_S) * px_per_m
     c_lo = y0 - hc
     c_hi = y0 + hc
     e_hi = c_hi + bl_in + max(0.0, lead_px)
@@ -54,11 +110,16 @@ def _roadkill_left_lane_blend_weight_at_row(y_row: float, y0: float) -> float:
         span = e_hi - c_hi
         if span <= 1e-9:
             return 0.0
-        return float(np.clip((e_hi - y_row) / span, 0.0, 1.0))
+        t_lin = float(np.clip((e_hi - y_row) / span, 0.0, 1.0))
+        return _raised_cosine01(t_lin)
     span = c_lo - e_lo
     if span <= 1e-9:
         return 0.0
-    return float(np.clip((y_row - e_lo) / span, 0.0, 1.0))
+    t_lin = float(np.clip((y_row - e_lo) / span, 0.0, 1.0))
+    # Power 1 = symmetric ease; <1 lingers longer in the detour before finishing the return.
+    p = float(getattr(cfg, "ROADKILL_DETOUR_EXIT_EASE_POWER", 1.0))
+    t_ease = float(np.clip(t_lin, 0.0, 1.0) ** p)
+    return _raised_cosine01(t_ease)
 
 
 def roadkill_left_lane_blend_weight_training(y_row: float) -> float:
@@ -126,8 +187,10 @@ def _roadkill_blend_weight_visible_gated(
     for_training_labels: bool,
 ) -> float:
     """
-    Like ``roadkill_left_lane_blend_weight*`` but ramps apply only when the splat is visible from a
-    **right-lane** camera pose (``near_c = center + right * right_lane_offset_px``). Core band still uses full ``w``.
+    **Approach** (before the core): lateral weight follows a **soft visibility** curve as soon as the
+    splat appears in the **right-lane** camera; only in the last ``ROADKILL_APPROACH_CORE_MERGE_CAR_LENGTHS``
+    car lengths is ``w`` blended up to 1 so the ego clears the obstacle. **Core** uses full ``w``.
+    **Exit** is geometry-only so the return can finish after the splat leaves the FOV.
     """
     rows = (
         _roadkill_obstacle_y_rows_training()
@@ -154,6 +217,8 @@ def _roadkill_blend_weight_visible_gated(
     cam_s = float(cfg.CAMERA_IMAGE_SIZE)
     bh = bool(cfg.PERSPECTIVE_INPUT_BOTTOM_HALF_ONLY)
     y_rf = float(y_row)
+    bl_out = _roadkill_exit_ramp_length_px()
+    merge_px = _roadkill_approach_merge_before_core_px()
     w_max = 0.0
     for y_obs in rows:
         wi = _roadkill_left_lane_blend_weight_at_row(y_row, y_obs)
@@ -161,11 +226,27 @@ def _roadkill_blend_weight_visible_gated(
         y0 = float(y_obs)
         c_lo = y0 - hc
         c_hi = y0 + hc
+        e_lo = c_lo - bl_out
         in_core = c_lo <= y_rf <= c_hi
+        in_exit_ramp = e_lo <= y_rf < c_lo
         ox, oy = roadkill_splat_center_bev_xy(dw, y_obs)
         uv = bev_point_to_camera_uv(M, ox, oy)
-        vis = uv is not None and _camera_uv_visible(uv[0], uv[1], cam_s, bh)
-        wi_eff = wi if (in_core or vis) else 0.0
+        if in_core:
+            wi_eff = wi
+        elif in_exit_ramp:
+            wi_eff = wi
+        elif y_rf > c_hi:
+            vis_w = 0.0
+            if uv is not None and _camera_uv_visible(uv[0], uv[1], cam_s, bh):
+                vis_w = _splat_visibility_soft_weight((uv[0], uv[1]), cam_s, bh)
+            if y_rf >= c_hi + merge_px:
+                wi_eff = vis_w
+            else:
+                t_m = float(np.clip((y_rf - c_hi) / max(merge_px, 1e-6), 0.0, 1.0))
+                geom_pull = _raised_cosine01(1.0 - t_m)
+                wi_eff = (1.0 - geom_pull) * vis_w + geom_pull * 1.0
+        else:
+            wi_eff = wi
         w_max = max(w_max, wi_eff)
     return w_max
 
@@ -188,8 +269,9 @@ def lateral_offset_px_avoid_roadkill(
     ``ROADKILL_OBSTACLE_Y_PX`` contribute. If false (default, ``simulate``), eval-only rows are included too.
 
     When ``ROADKILL_DETOUR_ONLY_WHEN_VISIBLE`` and ``world_bgr``, ``dw``, ``x_center``, ``psi`` are set,
-    merge ramps require the splat to project into the camera image (and into the bottom half if
-    ``PERSPECTIVE_INPUT_BOTTOM_HALF_ONLY``), evaluated from a right-lane vantage at ``right_lane_center_offset_px``.
+    the **approach** follows a soft splat visibility curve in the camera (bottom half if
+    ``PERSPECTIVE_INPUT_BOTTOM_HALF_ONLY``), then blends to full ``w`` just before the core; the **exit**
+    ramp is geometry-only so the return can finish after the hazard leaves the FOV.
     """
     r = float(right_lane_center_offset_px)
     if not cfg.ROADKILL_ENABLE:

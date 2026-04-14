@@ -118,18 +118,22 @@ ROAD_EDGE_THICKNESS = 1
 ROADKILL_ENABLE = True
 ROADKILL_OBSTACLE_Y_PX = (850.0,)
 ROADKILL_EVAL_ONLY_OBSTACLE_Y_PX = (300.0,)
-# Half-height (px) of the band where the ego uses the left lane at full strength.
-ROADKILL_DETOUR_CORE_HALF_PX = 38.0
-# Blend ramp on the **approach** side (larger ``y``, before the obstacle): ego starts moving left over this
-# many pixels in ``y``, after an optional time lead (see ``ROADKILL_APPROACH_LEAD_S``).
-ROADKILL_DETOUR_BLEND_PX = 55.0
-# Start the approach blend this many **seconds** sooner along the road (distance =
-# ``SIM_SPEED_M_S * ROADKILL_APPROACH_LEAD_S`` meters → px via ``WORLD_IMAGE_SIZE / WORLD_METERS``).
-ROADKILL_APPROACH_LEAD_S = 1.0
-# Blend ramp on the **exit** side (smaller ``y``, after the obstacle): shorter → back to right lane quickly.
-ROADKILL_DETOUR_BLEND_EXIT_PX = 14.0
-# If true, lateral detour applies only when a splat projects into the ego camera FOV (right-lane vantage,
-# same homography as ``perspective_camera_view``); core band over the obstacle still forces full detour.
+# Half-height (px) of full-strength detour over the splat; keep modest so most motion stays on eased ramps.
+ROADKILL_DETOUR_CORE_HALF_PX = 20.0
+# **Ungated / warp-fallback** approach only (sim+dataset use visibility-first when homography succeeds).
+# Keep short so ``y``-only labels do not dodge long before the obstacle.
+ROADKILL_APPROACH_LEAD_S = 0.0
+ROADKILL_DETOUR_BLEND_APPROACH_S = 1.0
+# After the splat is visible, blend ``w`` to 1.0 over this many ego car lengths before the core band.
+ROADKILL_APPROACH_CORE_MERGE_CAR_LENGTHS = 2.5
+# Larger → slower rise of visibility weight as the splat moves through the image (gentler steer in).
+ROADKILL_VIS_SPLAT_SOFT_RAMP_FRAC = 1.35
+# **Exit:** merge-back span along ``y`` = this × ``SIM_BEV_EGO_CAR_LENGTH_M`` × ``WORLD_IMAGE_SIZE / WORLD_METERS`` (default 4 × 3 m).
+ROADKILL_DETOUR_EXIT_CAR_LENGTHS = 4.0
+# Exit ramp: raise ``t`` to this power before raised-cosine (1 = symmetric; <1 = hold left longer).
+ROADKILL_DETOUR_EXIT_EASE_POWER = 1.0
+# If true, only the **approach** ramp is visibility-gated (soft); **exit** uses geometry so the merge
+# can finish after the splat leaves the camera (right-lane vantage / same homography as ``perspective_camera_view``).
 ROADKILL_DETOUR_ONLY_WHEN_VISIBLE = True
 # Ellipse half-axes (px) for splat art; ``generate_world`` clamps so the across-road size stays inside
 # one lane (see ``ROADKILL_ACROSS_MAX_FRAC_OF_LANE``).
@@ -347,6 +351,10 @@ SIM_DT = 0.05
 SIM_YAW_RATE_GAIN = _compute_sim_yaw_rate_gain()
 # Maximum simulation steps per ``simulate.run_simulation`` (hard cap; early exit may stop sooner).
 SIM_MAX_STEPS = 2000
+# If CUDA: enable cuDNN autotuner (helps fixed ``CAMERA_IMAGE_SIZE`` inference after a short warmup).
+SIM_CUDNN_BENCHMARK = True
+# If true and PyTorch supports ``torch.compile``, compile ``DrivingNet`` for faster step inference (first steps slower).
+SIM_TORCH_COMPILE = False
 # End roll-out when the centerline reference reaches the top drivable band (``y <= DATASET_MAP_MARGIN``).
 SIM_STOP_WHEN_REACHES_MAP_TOP = True
 # Meters from centerline toward driver's right; must match ``generate_dataset`` camera offset
@@ -378,8 +386,8 @@ SIM_REALTIME_WINDOW_GAP_PX = 32
 # ``cv2.waitKey`` delay (ms) per step after updating live windows; ``0`` = block until a key each step.
 SIM_REALTIME_BEV_WAIT_MS = 1
 # Extra pause (ms) per step **when a live OpenCV window is shown** (easier to follow; does not change physics).
-# Physics timing is still ``SIM_DT`` / ``SIM_SPEED_M_S``; to slow the integrated roll-out itself, change those.
-SIM_REALTIME_STEP_PAUSE_MS =8
+# Set to ``0`` for fastest live roll-out; physics still uses ``SIM_DT`` / ``SIM_SPEED_M_S``.
+SIM_REALTIME_STEP_PAUSE_MS = 0
 # BEV on-map speed bar (drag): position / ``SIM_REALTIME_SPEED_TRACKBAR_CENTER`` scales arc-length step per
 # roll-out iteration (100 = nominal ``SIM_SPEED_M_S * SIM_DT`` in px). Names are legacy from cv2 trackbars.
 SIM_REALTIME_SPEED_TRACKBAR_MAX = 200
