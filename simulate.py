@@ -20,6 +20,7 @@ half of the warp, then resize to ``CAMERA_IMAGE_SIZE``).
 """
 from __future__ import annotations
 
+import json
 import os
 
 import cv2
@@ -41,6 +42,23 @@ from generate_world import DrivingWorld
 def _project_root() -> str:
     """Absolute path to the project directory containing ``simulate.py``."""
     return os.path.dirname(os.path.abspath(__file__))
+
+
+def training_epochs_from_checkpoint(ckpt: str) -> int | None:
+    """
+    Total number of training epochs from ``training_log.json`` in the same directory as ``ckpt``.
+
+    Returns ``None`` if there is no log (e.g. weights copied only to ``data/driving_net.pt``).
+    """
+    log_path = os.path.join(os.path.dirname(os.path.abspath(ckpt)), "training_log.json")
+    if not os.path.isfile(log_path):
+        return None
+    try:
+        with open(log_path, encoding="utf-8") as f:
+            data = json.load(f)
+        return int(data["epochs"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
 
 
 def simulation_output_dir(ckpt: str) -> str:
@@ -408,14 +426,21 @@ def main() -> None:
     out_png = os.path.join(out_dir, "sim_path.png")
     out_csv = os.path.join(out_dir, "ego_path.csv")
     n_tr_stat, n_pert, frac_pert = train_perturb_stats_from_labels()
+    n_epochs = training_epochs_from_checkpoint(ckpt)
+    if n_epochs is not None:
+        epochs_line = f"Training epochs: {n_epochs}"
+    else:
+        epochs_line = f"Training epochs: {cfg.EPOCHS} (config; no log by weights)"
     _put_outlined_lines_bgr(
         vis,
         [
             f"Training examples: {n_tr_stat}",
             f"Perturbed: {frac_pert:.1%} ({n_pert}/{n_tr_stat})",
+            epochs_line,
         ],
         cfg.ANNOT_STEERING_POS,
     )
+    print(epochs_line)
     cv2.imwrite(out_png, vis)
     np.savetxt(
         out_csv,
