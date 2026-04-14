@@ -6,6 +6,54 @@ from scipy.interpolate import CubicSpline
 import config as cfg
 
 
+def roadkill_left_lane_blend_weight(y_row: float) -> float:
+    """
+    Smooth0..1 blend: 0 = right-lane lateral reference, 1 = left-lane (avoid obstacle).
+
+    Traffic advances toward **decreasing** ``y``. The obstacle sits near ``ROADKILL_OBSTACLE_Y_PX``.
+    Approach (larger ``y``): blend begins ``ROADKILL_APPROACH_LEAD_S`` s of travel before the south
+    edge of the core band (at ``SIM_SPEED_M_S``). Exit (smaller ``y``): shorter ramp via
+    ``ROADKILL_DETOUR_BLEND_EXIT_PX`` so the ego returns to the right lane as soon as it is clear.
+    """
+    if not cfg.ROADKILL_ENABLE:
+        return 0.0
+    y0 = float(cfg.ROADKILL_OBSTACLE_Y_PX)
+    hc = float(cfg.ROADKILL_DETOUR_CORE_HALF_PX)
+    bl_in = float(cfg.ROADKILL_DETOUR_BLEND_PX)
+    bl_out = float(cfg.ROADKILL_DETOUR_BLEND_EXIT_PX)
+    px_per_m = float(cfg.WORLD_IMAGE_SIZE) / float(cfg.WORLD_METERS)
+    lead_px = float(cfg.SIM_SPEED_M_S) * float(cfg.ROADKILL_APPROACH_LEAD_S) * px_per_m
+    c_lo = y0 - hc
+    c_hi = y0 + hc
+    e_hi = c_hi + bl_in + max(0.0, lead_px)
+    e_lo = c_lo - bl_out
+    if y_row > e_hi or y_row < e_lo:
+        return 0.0
+    if c_lo <= y_row <= c_hi:
+        return 1.0
+    if y_row > c_hi:
+        span = e_hi - c_hi
+        if span <= 1e-9:
+            return 0.0
+        return float(np.clip((e_hi - y_row) / span, 0.0, 1.0))
+    span = c_lo - e_lo
+    if span <= 1e-9:
+        return 0.0
+    return float(np.clip((y_row - e_lo) / span, 0.0, 1.0))
+
+
+def lateral_offset_px_avoid_roadkill(
+    y_row: float, right_lane_center_offset_px: float
+) -> float:
+    """
+    Signed lateral offset (px) along driver's right: nominal right-lane center, or mirrored left-lane
+    when passing the roadkill band (smooth ramps).
+    """
+    w = roadkill_left_lane_blend_weight(y_row)
+    r = float(right_lane_center_offset_px)
+    return (1.0 - w) * r + w * (-r)
+
+
 def _bezier_quadratic_xy_d1_d2(
     p0: np.ndarray,
     p1: np.ndarray,
@@ -36,8 +84,9 @@ def _bezier_quadratic_xy_batch(
 class DrivingWorld:
     """
     Top-down raster map: cubic-spline centerline from ``SPLINE_X_DELTAS_BOTTOM_TO_TOP``, two-lane road,
-    dashed center marking, optional bottom-half off-ramp (``OFFRAMP_*``). Curvature of the **main**
-    spline drives dataset steering labels after global scaling.
+    dashed center marking, optional bottom-half off-ramp (``OFFRAMP_*``), optional right-lane roadkill
+    obstacle (``ROADKILL_*``). Curvature of the **main** spline drives dataset steering labels after
+    global scaling; lateral reference can shift to the left lane to pass the obstacle.
     """
 
     def __init__(
@@ -311,6 +360,7 @@ class DrivingWorld:
         off = self._offramp_centerline_points()
         if off is not None and len(off) >= 2:
             self._draw_road_polyline(world, off, lane_px=lane_px, dash_len=dash_len, dash_gap=dash_gap)
+        self._draw_roadkill_obstacle(world)
         # Orientation: top of image is y=0 (small y); blue stripe marks that edge for debugging.
         cv2.line(
             world,
@@ -320,6 +370,89 @@ class DrivingWorld:
             thickness=4,
         )
         return world
+
+    def _draw_roadkill_obstacle(self, world: np.ndarray) -> None:
+        """Flattened red splat in the right lane (pavement) at ``ROADKILL_OBSTACLE_Y_PX``."""
+        if not cfg.ROADKILL_ENABLE:
+            return
+        size = int(self.size)
+        y0 = float(cfg.ROADKILL_OBSTACLE_Y_PX)
+        y0i = int(np.clip(int(round(y0)), 4, size - 5))
+        xc = float(self.cs(float(y0)))
+        dxdY = float(self.cs(float(y0), nu=1))
+        norm = float(np.hypot(dxdY, 1.0))
+        if norm < 1e-9:
+            return
+        fx, fy = -dxdY / norm, -1.0 / norm
+        rx, ry = -fy, fx
+        lane_off = float(
+            cfg.LANE_WIDTH_METERS * cfg.DATASET_RIGHT_LANE_LATERAL_FRAC * self.px_per_m
+        )
+        cx = int(np.clip(int(round(xc + rx * lane_off)), 4, size - 5))
+        cy = int(np.clip(int(round(float(y0i) + ry * lane_off)), 4, size - 5))
+        lane_w_px = float(cfg.LANE_WIDTH_METERS * self.px_per_m)
+        b_cap = max(2.0, float(cfg.ROADKILL_ACROSS_MAX_FRAC_OF_LANE) * lane_w_px)
+        a_cap = max(4.0, float(cfg.ROADKILL_ALONG_MAX_LANE_WIDTHS) * lane_w_px)
+        b = int(
+            round(
+                max(2.0, min(float(cfg.ROADKILL_ACROSS_ROAD_HALF_PX), b_cap))
+            )
+        )
+        a = int(
+            round(
+                max(4.0, min(float(cfg.ROADKILL_ALONG_ROAD_HALF_PX), a_cap))
+            )
+        )
+        ang = float(np.degrees(np.arctan2(fy, fx)))
+        # Red splat (high contrast on gray pavement)
+        cv2.ellipse(
+            world,
+            (cx, cy),
+            (a, max(2, b)),
+            ang,
+            0,
+            360,
+            (55, 55, 165),
+            -1,
+            cv2.LINE_AA,
+        )
+        # Brighter smear along forward direction
+        cx2 = int(cx - 0.32 * a * fx)
+        cy2 = int(cy - 0.32 * a * fy)
+        cv2.ellipse(
+            world,
+            (cx2, cy2),
+            (max(3, a // 2), max(2, b // 2)),
+            ang,
+            0,
+            360,
+            (85, 85, 235),
+            -1,
+            cv2.LINE_AA,
+        )
+        # Darker streak (smear core)
+        p0 = (
+            int(cx - 0.5 * a * fx + 2.0 * rx),
+            int(cy - 0.5 * a * fy + 2.0 * ry),
+        )
+        p1 = (
+            int(cx + 0.5 * a * fx + 2.0 * rx),
+            int(cy + 0.5 * a * fy + 2.0 * ry),
+        )
+        streak_t = max(1, min(3, int(round(0.35 * lane_w_px))))
+        cv2.line(world, p0, p1, (35, 35, 110), streak_t, cv2.LINE_AA)
+        # Highlight glint
+        cv2.ellipse(
+            world,
+            (cx - int(0.15 * a * fx), cy - int(0.15 * a * fy)),
+            (max(2, a // 5), max(2, b // 3)),
+            ang + 12.0,
+            0,
+            360,
+            (130, 130, 255),
+            -1,
+            cv2.LINE_AA,
+        )
 
 
 if __name__ == "__main__":

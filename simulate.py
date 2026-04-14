@@ -4,15 +4,15 @@ Open-loop behavioral-cloning roll-out on the bird's-eye map.
 **State:** ``(x, y)`` is on the main centerline when ``SIM_PROJECT_REF_ONTO_MAIN_ROAD`` is true: each step
 advances **arc length** along the spline (decreasing ``y``), so the logged path cannot chord off the road.
 ``psi`` still integrates from the network (``psi += steering * SIM_YAW_RATE_GAIN * SIM_DT``) for the
-BC state / CSV. The camera uses the spline tangent at ``y`` and ``SIM_EGO_LATERAL_OFFSET_M`` (same as
-``generate_dataset``).
+BC state / CSV. The camera uses the spline tangent at ``y`` and lateral offset vs row (right lane, or
+left-lane detour when ``ROADKILL_ENABLE`` — same as ``generate_dataset`` / ``lateral_offset_px_avoid_roadkill``).
 
 **Control:** The network predicts steering from the crop; ``train.py`` supervises **output channel 0``.
 With projection on, steering does **not** translate the centerline reference with ``cos/sin(psi)``—that
 mixture caused off-road jumps when combined with ``x = cs(y)``. Set ``SIM_PROJECT_REF_ONTO_MAIN_ROAD``
 false for unconstrained ``(x,y)`` integration (can leave the lane).
 
-**Visualization:** The red BEV overlay traces the right-lane camera path; **yellow bars** mark
+**Visualization:** The live BEV trail (pink/lavender polyline) follows the **right-lane** footprint, matching the scaled top-down ego car icon; **yellow bars** mark
 clean **main-road** training sample locations (same ``y`` grid as ``generate_dataset``). When off-ramp
 dataset rows are enabled, **orange bars** mark ramp samples (same spacing as ``train/offramp_*.jpg``:
 arc length along the Bézier when ``DATASET_SAMPLE_UNIFORM_ALONG_ROAD``; counts follow
@@ -22,7 +22,8 @@ each driver crop is written to ``sim_first_person.mp4`` (same preprocessing as t
 ``PERSPECTIVE_INPUT_BOTTOM_HALF_ONLY`` is true: bottom half of the warp, resized to ``CAMERA_IMAGE_SIZE``).
 With ``SIM_REALTIME_BEV`` / ``SIM_REALTIME_DRIVER_VIEW``, live OpenCV windows show the map trail and/or
 the ego camera (same crop as the model). **Pause** freezes the roll-out (Space, ``p``, or the **Pause**
-button on each window); **Resume** continues. Press ``q`` to stop, or **Ctrl+C** in the terminal
+button on each window); **Resume** continues. While **paused** on the BEV, **drag the ego vehicle icon**
+to snap the pose to another spot on the road (trail resets), then resume. Press ``q`` to stop, or **Ctrl+C** in the terminal
 (focus may need to be on the terminal; live windows use short ``waitKey`` polls so Ctrl+C can interrupt).
 Windows are tiled
 left-to-right (BEV then driver) using ``SIM_REALTIME_WINDOW_*`` so they do not overlap.
@@ -66,7 +67,21 @@ from reproducibility import set_global_seed
 set_global_seed(cfg.TRAIN_SEED)
 
 from driving_model import DrivingNet
-from generate_world import DrivingWorld
+from generate_world import DrivingWorld, lateral_offset_px_avoid_roadkill
+
+# Centerline ``(x,y)``, integrated ``psi``, whether pose is on the off-ramp, Bézier ``u`` (else0).
+SimPathPoint = tuple[float, float, float, bool, float]
+
+
+def _sim_path_point(
+    x: float,
+    y: float,
+    psi: float,
+    *,
+    on_ramp: bool = False,
+    u_ramp: float = 0.0,
+) -> SimPathPoint:
+    return (float(x), float(y), float(psi), bool(on_ramp), float(u_ramp))
 
 
 def _project_root() -> str:
@@ -271,9 +286,10 @@ def _blend_psi_toward(psi: float, psi_tgt: float, w: float) -> float:
     )
 
 
-def _ego_lateral_offset_px(dw: DrivingWorld) -> float:
-    """Camera/ego offset from centerline (px), same convention as training."""
-    return float(cfg.SIM_EGO_LATERAL_OFFSET_M) * float(dw.px_per_m)
+def _ego_lateral_offset_px_at_y(dw: DrivingWorld, y: float) -> float:
+    """Camera/ego offset from centerline (px); mirrors training (right lane, left-lane detour)."""
+    base = float(cfg.SIM_EGO_LATERAL_OFFSET_M) * float(dw.px_per_m)
+    return lateral_offset_px_avoid_roadkill(float(y), base)
 
 
 def _draw_lateral_sampling_bar(
@@ -298,10 +314,9 @@ def _draw_train_sampling_bars_on_bev(
     vis: np.ndarray,
     dw: DrivingWorld,
     train_y: np.ndarray,
-    lateral_offset_px: float,
 ) -> None:
     """
-    Draw yellow bars at clean **main-road** training sample locations on the BEV (right-lane ego).
+    Draw yellow bars at clean **main-road** training sample locations on the BEV (ego lateral vs row).
     """
     bar_half = max(8.0, 0.35 * float(cfg.LANE_WIDTH_METERS * dw.px_per_m))
     yellow_bgr = (0, 255, 255)
@@ -309,7 +324,8 @@ def _draw_train_sampling_bars_on_bev(
         yf = float(yf)
         xc = float(dw.get_road_center(yf))
         psi = initial_heading_road_aligned(dw.cs, yf)
-        qx, qy = _right_lane_overlay_xy(xc, yf, psi, lateral_offset_px)
+        lat = _ego_lateral_offset_px_at_y(dw, yf)
+        qx, qy = _right_lane_overlay_xy(xc, yf, psi, lat)
         _draw_lateral_sampling_bar(vis, qx, qy, psi, bar_half, yellow_bgr)
 
 
@@ -402,37 +418,110 @@ def _rt_draw_speed_slider(img: np.ndarray, ui: dict) -> None:
     )
 
 
+def _bev_ego_car_display_extents_px(px_per_m: float) -> tuple[float, float]:
+    """Length and width (px) for the BEV ego icon; preserves 3 m × 1.5 m aspect, optional floor."""
+    len_px = float(cfg.SIM_BEV_EGO_CAR_LENGTH_M) * float(px_per_m)
+    wid_px = float(cfg.SIM_BEV_EGO_CAR_WIDTH_M) * float(px_per_m)
+    mn = float(cfg.SIM_BEV_EGO_CAR_MIN_DISPLAY_LEN_PX)
+    if mn > 0.0 and len_px < mn:
+        s = mn / max(len_px, 1e-6)
+        len_px *= s
+        wid_px *= s
+    return len_px, wid_px
+
+
+def _bev_ego_car_polygon_xy(
+    cx: float,
+    cy: float,
+    psi: float,
+    len_px: float,
+    wid_px: float,
+) -> np.ndarray:
+    """
+    Closed quadrilateral: vehicle center ``(cx,cy)``, heading ``psi`` (forward = ``(cos ψ, sin ψ)``),
+    half-length ``len_px/2`` along forward, half-width ``wid_px/2`` along driver's right ``(-sin ψ, cos ψ)``.
+    """
+    fx = float(np.cos(psi))
+    fy = float(np.sin(psi))
+    rx = float(-np.sin(psi))
+    ry = float(np.cos(psi))
+    hl = 0.5 * float(len_px)
+    hw = 0.5 * float(wid_px)
+    corners = np.array(
+        [
+            [cx + hl * fx + hw * rx, cy + hl * fy + hw * ry],
+            [cx + hl * fx - hw * rx, cy + hl * fy - hw * ry],
+            [cx - hl * fx - hw * rx, cy - hl * fy - hw * ry],
+            [cx - hl * fx + hw * rx, cy - hl * fy + hw * ry],
+        ],
+        dtype=np.float64,
+    )
+    return np.round(corners).astype(np.int32).reshape(-1, 1, 2)
+
+
+def _draw_bev_ego_car_icon(
+    vis: np.ndarray,
+    cx: float,
+    cy: float,
+    psi: float,
+    px_per_m: float,
+    *,
+    body_bgr: tuple[int, int, int] = (55, 200, 75),
+    outline_bgr: tuple[int, int, int] = (255, 255, 255),
+    axis_bgr: tuple[int, int, int] = (120, 255, 200),
+) -> None:
+    """Top-down car: body fill, outline, thin hood line toward forward."""
+    len_px, wid_px = _bev_ego_car_display_extents_px(px_per_m)
+    poly = _bev_ego_car_polygon_xy(cx, cy, psi, len_px, wid_px)
+    cv2.fillConvexPoly(vis, poly, body_bgr)
+    cv2.polylines(vis, [poly], True, outline_bgr, 1, cv2.LINE_AA)
+    fx = float(np.cos(psi))
+    fy = float(np.sin(psi))
+    hx0 = cx - 0.22 * len_px * fx
+    hy0 = cy - 0.22 * len_px * fy
+    hx1 = cx + 0.38 * len_px * fx
+    hy1 = cy + 0.38 * len_px * fy
+    cv2.line(
+        vis,
+        (int(round(hx0)), int(round(hy0))),
+        (int(round(hx1)), int(round(hy1))),
+        axis_bgr,
+        1,
+        cv2.LINE_AA,
+    )
+
+
 def _bev_realtime_frame(
     world_bgr: np.ndarray,
-    path: list[tuple[float, float, float]],
+    dw: DrivingWorld,
+    path: list[SimPathPoint],
     x: float,
     y: float,
     psi_draw: float,
     lateral_px: float,
+    *,
+    extra_hint: str | None = None,
 ) -> np.ndarray:
-    """Bird's-eye frame for live display: centerline trail + ego at right-lane with heading arrow."""
+    """Bird's-eye frame: trail and ego in the **right lane** (not centerline)."""
     vis = world_bgr.copy()
     if len(path) >= 2:
-        pts = (
-            np.array([[p[0], p[1]] for p in path], dtype=np.float32)
-            .round()
-            .astype(np.int32)
-            .reshape(-1, 1, 2)
-        )
+        n = len(path)
+        qs = np.empty((n, 2), dtype=np.float32)
+        for i, p in enumerate(path):
+            xc, yc, _psi, on_r, ur = p
+            psi_d = _path_point_psi_draw(dw, xc, yc, on_r, ur)
+            lat_i = _ego_lateral_offset_px_at_y(dw, float(yc))
+            qx, qy = _right_lane_overlay_xy(float(xc), float(yc), psi_d, lat_i)
+            qs[i, 0] = qx
+            qs[i, 1] = qy
+        pts = qs.round().astype(np.int32).reshape(-1, 1, 2)
         cv2.polylines(vis, [pts], False, (200, 200, 255), 2, cv2.LINE_AA)
     qx, qy = _right_lane_overlay_xy(float(x), float(y), float(psi_draw), lateral_px)
-    qi = (int(round(qx)), int(round(qy)))
-    cv2.circle(vis, qi, 7, (0, 255, 0), -1, cv2.LINE_AA)
-    cv2.circle(vis, qi, 8, (255, 255, 255), 1, cv2.LINE_AA)
-    alen = 28.0
-    tip = (
-        int(round(qx + alen * float(np.cos(psi_draw)))),
-        int(round(qy + alen * float(np.sin(psi_draw)))),
-    )
-    cv2.arrowedLine(vis, qi, tip, (0, 255, 255), 2, cv2.LINE_AA, tipLength=0.22)
+    _draw_bev_ego_car_icon(vis, float(qx), float(qy), float(psi_draw), float(dw.px_per_m))
+    line1 = f"step {len(path) - 1}   Space pause   q quit   Ctrl+C (terminal)"
     cv2.putText(
         vis,
-        f"step {len(path) - 1}   Space pause   q quit   Ctrl+C (terminal)",
+        line1,
         (10, 26),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.65,
@@ -440,6 +529,17 @@ def _bev_realtime_frame(
         2,
         cv2.LINE_AA,
     )
+    if extra_hint:
+        cv2.putText(
+            vis,
+            extra_hint,
+            (10, 52),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (180, 255, 220),
+            2,
+            cv2.LINE_AA,
+        )
     return vis
 
 
@@ -494,6 +594,41 @@ def _rt_draw_paused_banner(img: np.ndarray) -> None:
     )
 
 
+def _rt_annotate_driver_view(drv: np.ndarray, steering: float) -> None:
+    """Overlay steering readout and hints on the live driver crop."""
+    dh, drv_w = drv.shape[:2]
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    steer_scale = max(0.28, min(0.5, float(dh) / 320.0))
+    hint_scale = max(0.24, min(0.42, float(dh) / 360.0))
+    thick = 1
+    steer_txt = f"s{steering:+.3f}"
+    (tw, _), _ = cv2.getTextSize(steer_txt, font, steer_scale, thick)
+    if tw > drv_w - 4:
+        steer_scale *= (drv_w - 4) / float(max(tw, 1))
+    y_steer = max(13, int(round(0.14 * dh)))
+    y_hint = min(dh - 3, max(y_steer + 8, int(round(0.26 * dh))))
+    cv2.putText(
+        drv,
+        steer_txt,
+        (2, y_steer),
+        font,
+        steer_scale,
+        (0, 255, 0),
+        thick,
+        cv2.LINE_AA,
+    )
+    cv2.putText(
+        drv,
+        "Space/btn pause  q quit  Ctrl+C",
+        (2, y_hint),
+        font,
+        hint_scale,
+        (255, 255, 255),
+        thick,
+        cv2.LINE_AA,
+    )
+
+
 def _rt_mouse_bev(event: int, x: int, y: int, flags: int, ui: dict) -> None:
     if int(ui.get("sim_step", 0)) < 2:
         return
@@ -504,16 +639,71 @@ def _rt_mouse_bev(event: int, x: int, y: int, flags: int, ui: dict) -> None:
             if sx0 <= x <= sx1 and sy0 <= y <= sy1:
                 ui["speed_drag"] = True
                 _rt_speed_slider_set_from_mx(ui, x, sx0, sx1)
-            return
-        if event == cv2.EVENT_MOUSEMOVE and (flags & cv2.EVENT_FLAG_LBUTTON):
+                return
+        elif event == cv2.EVENT_MOUSEMOVE and (flags & cv2.EVENT_FLAG_LBUTTON):
             if ui.get("speed_drag"):
                 _rt_speed_slider_set_from_mx(ui, x, sx0, sx1)
-            return
-        if event == cv2.EVENT_LBUTTONUP:
+                return
+        elif event == cv2.EVENT_LBUTTONUP:
             if ui.get("speed_drag"):
                 ui["speed_drag"] = False
                 _rt_speed_slider_set_from_mx(ui, x, sx0, sx1)
                 return
+    paused = bool(ui.get("rt_sim_paused", False))
+    ctx = ui.get("relocate_ctx")
+    hit = ui.get("ego_hit_xy")
+    grab_r = float(ui.get("ego_grab_radius_px", _RT_EGO_GRAB_RADIUS_PX))
+    if paused and ctx is not None and hit is not None and hit[0] >= 0:
+        px1, py1, px2, py2 = ui.get("bev_rect", (-1, -1, -2, -2))
+        on_pause_btn = px2 > px1 and py2 > py1 and px1 <= x <= px2 and py1 <= y <= py2
+        if event == cv2.EVENT_LBUTTONDOWN and not ui.get("speed_drag"):
+            if on_pause_btn:
+                return
+            hx, hy = hit
+            if (x - hx) ** 2 + (y - hy) ** 2 <= grab_r**2:
+                ui["ego_drag"] = True
+                pose = _bev_reloc_snap_validated(
+                    ctx["dw"],
+                    ctx["world"],
+                    float(x),
+                    float(y),
+                    int(ctx["h"]),
+                    float(ctx["margin"]),
+                    bool(ctx["follow_ramp_geom"]),
+                )
+                if pose is not None:
+                    ui["reloc_preview_pose"] = pose
+            return
+        if event == cv2.EVENT_MOUSEMOVE and (flags & cv2.EVENT_FLAG_LBUTTON) and ui.get(
+            "ego_drag"
+        ):
+            pose = _bev_reloc_snap_validated(
+                ctx["dw"],
+                ctx["world"],
+                float(x),
+                float(y),
+                int(ctx["h"]),
+                float(ctx["margin"]),
+                bool(ctx["follow_ramp_geom"]),
+            )
+            if pose is not None:
+                ui["reloc_preview_pose"] = pose
+            return
+        if event == cv2.EVENT_LBUTTONUP and ui.get("ego_drag"):
+            ui["ego_drag"] = False
+            pose = _bev_reloc_snap_validated(
+                ctx["dw"],
+                ctx["world"],
+                float(x),
+                float(y),
+                int(ctx["h"]),
+                float(ctx["margin"]),
+                bool(ctx["follow_ramp_geom"]),
+            )
+            ui.pop("reloc_preview_pose", None)
+            if pose is not None:
+                ui["reloc_pending"] = pose
+            return
     # Pause: ``LBUTTONUP`` avoids spurious ``DOWN`` when the window grabs focus.
     if event != cv2.EVENT_LBUTTONUP:
         return
@@ -650,6 +840,173 @@ def _right_lane_overlay_xy(
     return x + rx * lateral_offset_px, y + ry * lateral_offset_px
 
 
+def _path_point_psi_draw(
+    dw: DrivingWorld,
+    x: float,
+    y: float,
+    on_ramp: bool,
+    u_ramp: float,
+) -> float:
+    """Road tangent at a logged centerline pose (matches live ``psi_draw`` / camera heading)."""
+    if on_ramp:
+        ev = dw.offramp_bezier_evolution(float(u_ramp))
+        if ev is None:
+            return float(initial_heading_road_aligned(dw.cs, y))
+        _, (fx, fy), _ = ev
+        return float(np.arctan2(fy, fx))
+    return float(initial_heading_road_aligned(dw.cs, y))
+
+
+# BEV relocate: minimum hit radius (px) when the ego icon is tiny on the map.
+_RT_EGO_GRAB_RADIUS_PX = 28.0
+
+
+def _bev_ego_grab_radius_px(px_per_m: float) -> float:
+    """Hit radius for drag-relocate: covers the car footprint plus a small margin."""
+    len_px, wid_px = _bev_ego_car_display_extents_px(px_per_m)
+    diag = float(np.hypot(0.5 * len_px, 0.5 * wid_px))
+    return max(float(_RT_EGO_GRAB_RADIUS_PX), diag + 8.0)
+
+
+def _snap_main_right_lane_nearest(
+    dw: DrivingWorld,
+    mx: float,
+    my: float,
+    h: int,
+    margin: float,
+) -> tuple[float, float, float, float] | None:
+    """
+    Closest main-road **right-lane** footprint to ``(mx, my)`` in BEV px.
+
+    Returns ``(x_centerline, y, psi_road, d2)`` or ``None``.
+    """
+    y_lo, y_hi = _sim_arc_y_bounds(h, margin)
+    n = 320
+    ys = np.linspace(y_lo, y_hi, n, dtype=np.float64)
+    qxs = np.empty(n, dtype=np.float64)
+    qys = np.empty(n, dtype=np.float64)
+    for i, yi in enumerate(ys):
+        yi = float(yi)
+        xc = float(dw.get_road_center(yi))
+        pr = initial_heading_road_aligned(dw.cs, yi)
+        lat = _ego_lateral_offset_px_at_y(dw, yi)
+        qx, qy = _right_lane_overlay_xy(xc, yi, pr, lat)
+        qxs[i] = qx
+        qys[i] = qy
+    d2 = (qxs - mx) ** 2 + (qys - my) ** 2
+    idx = int(np.argmin(d2))
+    best_y = float(ys[idx])
+    best_d2 = float(d2[idx])
+    step = float(ys[1] - ys[0]) if n > 1 else 1.0
+    y_lo2 = max(y_lo, best_y - 2.0 * step)
+    y_hi2 = min(y_hi, best_y + 2.0 * step)
+    for yi in np.linspace(y_lo2, y_hi2, 48, dtype=np.float64):
+        yi = float(yi)
+        xc = float(dw.get_road_center(yi))
+        pr = initial_heading_road_aligned(dw.cs, yi)
+        lat = _ego_lateral_offset_px_at_y(dw, yi)
+        qx, qy = _right_lane_overlay_xy(xc, yi, pr, lat)
+        d2i = (qx - mx) ** 2 + (qy - my) ** 2
+        if d2i < best_d2:
+            best_d2 = float(d2i)
+            best_y = yi
+    xc_f = float(dw.get_road_center(best_y))
+    psi_f = initial_heading_road_aligned(dw.cs, best_y)
+    return xc_f, best_y, psi_f, best_d2
+
+
+def _snap_ramp_right_lane_nearest(
+    dw: DrivingWorld,
+    mx: float,
+    my: float,
+) -> tuple[float, float, float, float, float] | None:
+    """
+    Closest off-ramp **right-lane** footprint to ``(mx, my)``.
+
+    Returns ``(u, x_centerline, y, psi_road, d2)`` or ``None``.
+    """
+    if dw._offramp_bezier_controls() is None:
+        return None
+    n = 220
+    us = np.linspace(0.0, 1.0, n, dtype=np.float64)
+    best_d2 = 1e30
+    best: tuple[float, float, float, float] | None = None
+    for u in us:
+        u = float(u)
+        ev = dw.offramp_bezier_evolution(u)
+        if ev is None:
+            continue
+        B, (fx, fy), _ = ev
+        px, py = float(B[0]), float(B[1])
+        pr = float(np.arctan2(fy, fx))
+        lat = _ego_lateral_offset_px_at_y(dw, py)
+        qx, qy = _right_lane_overlay_xy(px, py, pr, lat)
+        d2 = (qx - mx) ** 2 + (qy - my) ** 2
+        if d2 < best_d2:
+            best_d2 = float(d2)
+            best = (u, px, py, pr)
+    if best is None:
+        return None
+    u_b, px_b, py_b, pr_b = best
+    return u_b, px_b, py_b, pr_b, best_d2
+
+
+def _bev_reloc_snap_validated(
+    dw: DrivingWorld,
+    world_bgr: np.ndarray,
+    mx: float,
+    my: float,
+    h: int,
+    margin: float,
+    follow_ramp_geom: bool,
+) -> dict[str, float | bool] | None:
+    """
+    Snap a BEV click to the nearest valid drivable pose (main and/or ramp), preferring smaller
+    screen-space error. ``psi`` is road tangent; ``get_view_from_pose`` must succeed.
+    """
+    candidates: list[tuple[float, float, float, float, bool, float]] = []
+    main = _snap_main_right_lane_nearest(dw, mx, my, h, margin)
+    if main is not None:
+        xc, y, psi_m, d2m = main
+        candidates.append((d2m, xc, y, psi_m, False, 0.0))
+    if follow_ramp_geom and dw._offramp_bezier_controls() is not None:
+        ramp = _snap_ramp_right_lane_nearest(dw, mx, my)
+        if ramp is not None:
+            u_r, rx, ry, psi_r, d2r = ramp
+            candidates.append((d2r, rx, ry, psi_r, True, u_r))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda t: t[0])
+    for _d2, x, y, psi_road, on_r, u_r in candidates:
+        if on_r:
+            ev = dw.offramp_bezier_evolution(float(u_r))
+            if ev is None:
+                continue
+            _, (fx, fy), _ = ev
+            psi_cam = float(np.arctan2(fy, fx))
+        else:
+            psi_cam = float(initial_heading_road_aligned(dw.cs, float(y)))
+        if (
+            get_view_from_pose(
+                world_bgr,
+                float(x),
+                float(y),
+                psi_cam,
+                _ego_lateral_offset_px_at_y(dw, float(y)),
+            )
+            is None
+        ):
+            continue
+        return {
+            "x": float(x),
+            "y": float(y),
+            "psi": psi_cam,
+            "on_ramp": bool(on_r),
+            "u_ramp": float(u_r),
+        }
+    return None
+
+
 def _advance_main_centerline_arc_px(
     dw: DrivingWorld,
     y: float,
@@ -698,7 +1055,7 @@ def find_start_pose_bottom(
                 x0,
                 y0,
                 psi,
-                _ego_lateral_offset_px(dw),
+                _ego_lateral_offset_px_at_y(dw, y0),
             )
             is not None
         ):
@@ -711,7 +1068,7 @@ def find_start_pose_bottom(
 
 def run_simulation() -> tuple[
     np.ndarray,
-    list[tuple[float, float, float]],
+    list[SimPathPoint],
     str,
     float,
     str | None,
@@ -728,7 +1085,8 @@ def run_simulation() -> tuple[
     available) to ``<simulation_output_dir>/<SIM_FP_VIDEO_FILENAME>`` at ``SIM_VIDEO_FPS``.
 
     Returns:
-        ``world_bgr``, list of **centerline** ``(x, y, psi)`` (psi in rad), checkpoint path,
+        ``world_bgr``, list of ``SimPathPoint`` (centerline ``x,y``, integrated ``psi``, ramp flag,
+        ``u_ramp``), checkpoint path,
         ``px_per_m``, and absolute path to the first-person MP4 if recorded, else ``None``.
     """
     ckpt = latest_checkpoint_path()
@@ -763,11 +1121,10 @@ def run_simulation() -> tuple[
         os.makedirs(out_dir, exist_ok=True)
         fp_video_abs = os.path.join(out_dir, cfg.SIM_FP_VIDEO_FILENAME)
 
-    path: list[tuple[float, float, float]] = [(x0, y0, psi)]
+    path: list[SimPathPoint] = [_sim_path_point(x0, y0, psi)]
     x, y = x0, y0
     base_step_dist_px = cfg.SIM_SPEED_M_S * cfg.SIM_DT * px_per_m
 
-    lateral_px = _ego_lateral_offset_px(dw)
     off_ok = dw._offramp_bezier_controls() is not None
     follow_ramp_geom = (
         cfg.SIM_TAKE_OFFRAMP
@@ -787,7 +1144,7 @@ def run_simulation() -> tuple[
             x0 = float(B0[0])
             y0 = float(B0[1])
             x, y = x0, y0
-            path[0] = (x0, y0, psi)
+            path[0] = _sim_path_point(x0, y0, psi, on_ramp=True, u_ramp=0.0)
 
     rt_window = False
     rt_driver_window = False
@@ -805,6 +1162,13 @@ def run_simulation() -> tuple[
         "speed_track_pos": int(cfg.SIM_REALTIME_SPEED_TRACKBAR_DEFAULT),
         "speed_drag": False,
         "speed_slider_rect": (-1, -1, -2, -2),
+        "rt_sim_paused": False,
+        "relocate_ctx": None,
+        "ego_hit_xy": (-1, -1),
+        "ego_grab_radius_px": _RT_EGO_GRAB_RADIUS_PX,
+        "ego_drag": False,
+        "reloc_preview_pose": None,
+        "reloc_pending": None,
     }
     user_quit_rt = False
     interrupt_rt = [False]
@@ -841,7 +1205,7 @@ def run_simulation() -> tuple[
                 x,
                 y,
                 psi_cam,
-                lateral_px,
+                _ego_lateral_offset_px_at_y(dw, float(y)),
             )
             if view is None:
                 break
@@ -913,7 +1277,15 @@ def run_simulation() -> tuple[
                     psi = _blend_psi_toward(
                         psi, initial_heading_road_aligned(dw.cs, y), wb
                     )
-            path.append((float(x), float(y), float(psi)))
+            path.append(
+                _sim_path_point(
+                    float(x),
+                    float(y),
+                    float(psi),
+                    on_ramp=on_ramp,
+                    u_ramp=u_ramp,
+                )
+            )
     
             if on_ramp:
                 ev_draw = dw.offramp_bezier_evolution(u_ramp)
@@ -924,13 +1296,31 @@ def run_simulation() -> tuple[
                     psi_draw = psi_cam
             else:
                 psi_draw = initial_heading_road_aligned(dw.cs, y)
-    
+
+            rt_ui["relocate_ctx"] = {
+                "dw": dw,
+                "world": world,
+                "h": h,
+                "margin": margin,
+                "follow_ramp_geom": follow_ramp_geom,
+            }
+            lat_hit = _ego_lateral_offset_px_at_y(dw, float(y))
+            qx_hit, qy_hit = _right_lane_overlay_xy(
+                float(x), float(y), float(psi_draw), lat_hit
+            )
+            rt_ui["ego_hit_xy"] = (int(round(qx_hit)), int(round(qy_hit)))
+            rt_ui["ego_grab_radius_px"] = _bev_ego_grab_radius_px(float(dw.px_per_m))
+
             live_bev = cfg.SIM_REALTIME_BEV and not rt_gui_disabled
             live_drv = cfg.SIM_REALTIME_DRIVER_VIEW and not rt_gui_disabled
             if live_bev or live_drv:
                 try:
                     view_live = get_view_from_pose(
-                        world, x, y, psi_draw, lateral_px
+                        world,
+                        x,
+                        y,
+                        psi_draw,
+                        _ego_lateral_offset_px_at_y(dw, float(y)),
                     )
                     if view_live is None:
                         break
@@ -950,39 +1340,7 @@ def run_simulation() -> tuple[
                                 rt_ui,
                             )
                         drv = vframe.copy()
-                        dh, drv_w = drv.shape[:2]
-                        font = cv2.FONT_HERSHEY_SIMPLEX
-                        # Small model input (e.g. 128²): scale to image height; shrink if wider than frame.
-                        steer_scale = max(0.28, min(0.5, float(dh) / 320.0))
-                        hint_scale = max(0.24, min(0.42, float(dh) / 360.0))
-                        thick = 1
-                        steer_txt = f"s{steering:+.3f}"
-                        (tw, _), _ = cv2.getTextSize(steer_txt, font, steer_scale, thick)
-                        if tw > drv_w - 4:
-                            steer_scale *= (drv_w - 4) / float(max(tw, 1))
-                        # ``putText`` origin is bottom-left of baseline; place lines by fraction of height.
-                        y_steer = max(13, int(round(0.14 * dh)))
-                        y_hint = min(dh - 3, max(y_steer + 8, int(round(0.26 * dh))))
-                        cv2.putText(
-                            drv,
-                            steer_txt,
-                            (2, y_steer),
-                            font,
-                            steer_scale,
-                            (0, 255, 0),
-                            thick,
-                            cv2.LINE_AA,
-                        )
-                        cv2.putText(
-                            drv,
-                            "Space/btn pause  q quit  Ctrl+C",
-                            (2, y_hint),
-                            font,
-                            hint_scale,
-                            (255, 255, 255),
-                            thick,
-                            cv2.LINE_AA,
-                        )
+                        _rt_annotate_driver_view(drv, steering)
                     if live_bev:
                         if not rt_window:
                             cv2.namedWindow(
@@ -994,13 +1352,20 @@ def run_simulation() -> tuple[
                                 _rt_mouse_bev,
                                 rt_ui,
                             )
+                        bev_hint = (
+                            "PAUSED: drag ego car to move, release on road"
+                            if rt_sim_paused
+                            else None
+                        )
                         fr = _bev_realtime_frame(
                             world,
+                            dw,
                             path,
                             x,
                             y,
                             psi_draw,
-                            lateral_px,
+                            _ego_lateral_offset_px_at_y(dw, float(y)),
+                            extra_hint=bev_hint,
                         )
                         _rt_draw_speed_slider(fr, rt_ui)
                     if not rt_windows_placed:
@@ -1009,8 +1374,92 @@ def run_simulation() -> tuple[
     
                     pause_ms = int(cfg.SIM_REALTIME_STEP_PAUSE_MS)
                     while True:
+                        rp = rt_ui.pop("reloc_pending", None)
+                        if rp is not None:
+                            x = float(rp["x"])
+                            y = float(rp["y"])
+                            psi = float(rp["psi"])
+                            on_ramp = bool(rp["on_ramp"])
+                            u_ramp = float(rp["u_ramp"])
+                            psi_draw = float(rp["psi"])
+                            path.clear()
+                            path.append(
+                                _sim_path_point(
+                                    x,
+                                    y,
+                                    psi,
+                                    on_ramp=on_ramp,
+                                    u_ramp=u_ramp,
+                                )
+                            )
+                            lat_hit = _ego_lateral_offset_px_at_y(dw, float(y))
+                            qx_hit, qy_hit = _right_lane_overlay_xy(
+                                float(x), float(y), float(psi_draw), lat_hit
+                            )
+                            rt_ui["ego_hit_xy"] = (
+                                int(round(qx_hit)),
+                                int(round(qy_hit)),
+                            )
+                            rt_ui["ego_grab_radius_px"] = _bev_ego_grab_radius_px(
+                                float(dw.px_per_m)
+                            )
+                            if fr is not None:
+                                bh = (
+                                    "PAUSED: drag ego car to move, release on road"
+                                    if rt_sim_paused
+                                    else None
+                                )
+                                fr = _bev_realtime_frame(
+                                    world,
+                                    dw,
+                                    path,
+                                    x,
+                                    y,
+                                    psi_draw,
+                                    lat_hit,
+                                    extra_hint=bh,
+                                )
+                                _rt_draw_speed_slider(fr, rt_ui)
+                            view_live = get_view_from_pose(
+                                world,
+                                x,
+                                y,
+                                psi_draw,
+                                lat_hit,
+                            )
+                            if view_live is not None and drv is not None:
+                                vframe = _fp_video_frame_bgr(view_live)
+                                drv = vframe.copy()
+                                _rt_annotate_driver_view(drv, steering)
                         rt_ui["toggle"] = False
                         paused = rt_sim_paused
+                        rt_ui["rt_sim_paused"] = paused
+                        disp_x, disp_y = float(x), float(y)
+                        disp_psi_draw = float(psi_draw)
+                        disp_lat = _ego_lateral_offset_px_at_y(dw, float(y))
+                        prv = rt_ui.get("reloc_preview_pose")
+                        if paused and isinstance(prv, dict) and rt_ui.get("ego_drag"):
+                            disp_x = float(prv["x"])
+                            disp_y = float(prv["y"])
+                            disp_psi_draw = float(prv["psi"])
+                            disp_lat = _ego_lateral_offset_px_at_y(dw, disp_y)
+                        if fr is not None:
+                            bh = (
+                                "PAUSED: drag ego car to move, release on road"
+                                if paused
+                                else None
+                            )
+                            fr = _bev_realtime_frame(
+                                world,
+                                dw,
+                                path,
+                                disp_x,
+                                disp_y,
+                                disp_psi_draw,
+                                disp_lat,
+                                extra_hint=bh,
+                            )
+                            _rt_draw_speed_slider(fr, rt_ui)
                         fr_disp = fr.copy() if fr is not None else None
                         drv_disp = drv.copy() if drv is not None else None
                         if fr_disp is not None:
@@ -1050,6 +1499,9 @@ def run_simulation() -> tuple[
                             and key_ch in (ord(" "), ord("p"))
                         ) or clicked:
                             rt_sim_paused = not rt_sim_paused
+                            if not rt_sim_paused:
+                                rt_ui["ego_drag"] = False
+                                rt_ui.pop("reloc_preview_pose", None)
                             if rt_sim_paused:
                                 continue
                             break
@@ -1120,7 +1572,13 @@ def run_simulation() -> tuple[
                 psi_end = initial_heading_road_aligned(dw.cs, y)
         else:
             psi_end = initial_heading_road_aligned(dw.cs, y)
-        view_end = get_view_from_pose(world, x, y, psi_end, lateral_px)
+        view_end = get_view_from_pose(
+            world,
+            x,
+            y,
+            psi_end,
+            _ego_lateral_offset_px_at_y(dw, float(y)),
+        )
         if view_end is not None:
             video_writer.write(_fp_video_frame_bgr(view_end))
         video_writer.release()
@@ -1140,9 +1598,8 @@ def main() -> None:
     n_train, n_test = count_train_test_examples()
     print(f"Dataset: {n_train} train examples, {n_test} test examples")
     world_bgr, path, ckpt, px_per_m, fp_video = run_simulation()
-    path_arr = np.array(path, dtype=np.float64)
+    path_arr = np.array([[p[0], p[1], p[2]] for p in path], dtype=np.float64)
 
-    lateral_px = float(cfg.SIM_EGO_LATERAL_OFFSET_M) * px_per_m
     vis = world_bgr.copy()
     dw_overlay = DrivingWorld()
     train_y_rows, _ = dataset_train_test_y(
@@ -1155,7 +1612,7 @@ def main() -> None:
         uniform_along_road=cfg.DATASET_SAMPLE_UNIFORM_ALONG_ROAD,
         road_cs=dw_overlay.cs,
     )
-    _draw_train_sampling_bars_on_bev(vis, dw_overlay, train_y_rows, lateral_px)
+    _draw_train_sampling_bars_on_bev(vis, dw_overlay, train_y_rows)
     L_ramp_px = float(dw_overlay.offramp_arc_length_px())
     n_offramp_train_vis, _ = offramp_clean_counts_matching_main_spacing(
         L_ramp_px,
@@ -1178,14 +1635,18 @@ def main() -> None:
             vis,
             dw_overlay,
             int(n_offramp_train_vis),
-            lateral_px,
+            float(cfg.SIM_EGO_LATERAL_OFFSET_M) * px_per_m,
         )
     poly_xy: list[list[float]] = []
     for i in range(len(path) - 1):
-        x_a, y_a, _ = path[i]
-        x_b, y_b, _ = path[i + 1]
+        x_a, y_a, _, _, _ = path[i]
+        x_b, y_b, _, _, _ = path[i + 1]
+        lat_m = 0.5 * (
+            _ego_lateral_offset_px_at_y(dw_overlay, float(y_a))
+            + _ego_lateral_offset_px_at_y(dw_overlay, float(y_b))
+        )
         seg = _right_lane_polyline_xy_chord(
-            x_a, y_a, x_b, y_b, lateral_px, n=24
+            x_a, y_a, x_b, y_b, lat_m, n=24
         )
         if i == 0:
             poly_xy.extend(seg.tolist())
@@ -1196,22 +1657,28 @@ def main() -> None:
         arr_i = np.round(arr).astype(np.int32).reshape(-1, 1, 2)
         cv2.polylines(vis, [arr_i], False, (0, 0, 255), 2, cv2.LINE_AA)
     if len(path) > 0:
-        x0, y0, _ = path[0]
-        xe, ye, _ = path[-1]
-        if len(path) >= 2:
-            xn, yn, _ = path[1]
-            ps0 = float(np.arctan2(yn - y0, xn - x0))
-        else:
-            ps0 = initial_heading_road_aligned(dw_overlay.cs, y0)
-        if len(path) >= 2:
-            xp, yp, _ = path[-2]
-            pse = float(np.arctan2(ye - yp, xe - xp))
-        else:
-            pse = initial_heading_road_aligned(dw_overlay.cs, ye)
-        sq = _right_lane_overlay_xy(x0, y0, ps0, lateral_px)
-        eq = _right_lane_overlay_xy(xe, ye, pse, lateral_px)
-        cv2.circle(vis, (int(round(sq[0])), int(round(sq[1]))), 6, (0, 255, 0), -1, cv2.LINE_AA)
-        cv2.circle(vis, (int(round(eq[0])), int(round(eq[1]))), 6, (255, 0, 0), -1, cv2.LINE_AA)
+        x0, y0, _, on0, u0 = path[0]
+        xe, ye, _, one, ue = path[-1]
+        ps0 = _path_point_psi_draw(dw_overlay, x0, y0, on0, u0)
+        pse = _path_point_psi_draw(dw_overlay, xe, ye, one, ue)
+        sq = _right_lane_overlay_xy(
+            x0, y0, ps0, _ego_lateral_offset_px_at_y(dw_overlay, float(y0))
+        )
+        eq = _right_lane_overlay_xy(
+            xe, ye, pse, _ego_lateral_offset_px_at_y(dw_overlay, float(ye))
+        )
+        _draw_bev_ego_car_icon(
+            vis, float(sq[0]), float(sq[1]), ps0, float(dw_overlay.px_per_m)
+        )
+        _draw_bev_ego_car_icon(
+            vis,
+            float(eq[0]),
+            float(eq[1]),
+            pse,
+            float(dw_overlay.px_per_m),
+            body_bgr=(55, 55, 220),
+            axis_bgr=(180, 220, 255),
+        )
 
     out_dir = simulation_output_dir(ckpt)
     os.makedirs(out_dir, exist_ok=True)

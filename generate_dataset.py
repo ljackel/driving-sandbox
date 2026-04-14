@@ -23,7 +23,7 @@ from dataset_split import (
     dataset_train_test_y,
     offramp_clean_counts_matching_main_spacing,
 )
-from generate_world import DrivingWorld
+from generate_world import DrivingWorld, lateral_offset_px_avoid_roadkill
 
 
 def signed_path_curvature(cs, y: float) -> float:
@@ -125,7 +125,7 @@ def _sample_perturbed_perspective_view(
     yf: float,
     road_x: float,
     dxdY: float,
-    right_lane_offset_px: float,
+    lateral_base_px: float,
     px_per_m: float,
     rng: np.random.Generator,
     lateral_std_m: float,
@@ -133,6 +133,8 @@ def _sample_perturbed_perspective_view(
 ):
     """
     Sample Gaussian lateral (m) and yaw (rad), shrinking until ``get_perspective_view`` succeeds.
+
+    ``lateral_base_px`` is the nominal offset at this row (includes roadkill detour when enabled).
 
     Returns:
         ``(view, lat_m, yaw_rad)`` with ``view`` possibly ``None`` if every attempt fails.
@@ -142,7 +144,7 @@ def _sample_perturbed_perspective_view(
         yaw_draw = float(rng.normal(0.0, yaw_std_rad))
 
         def _warp_attempt(lat_m: float, yaw_rad: float):
-            lateral_px = right_lane_offset_px + lat_m * px_per_m
+            lateral_px = lateral_base_px + lat_m * px_per_m
             return get_perspective_view(
                 world_img,
                 yf,
@@ -323,6 +325,11 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES, num_test=cfg.NUM_TEST_FRAMES):
     **Test filenames:** ``test/frame_{0..num_test-1}.jpg`` (clean), then
     ``test/frame_{num_test..2*num_test-1}.jpg`` (perturbed) under the same perturbation conditions.
 
+    **Roadkill:** when ``ROADKILL_ENABLE``, the map includes a right-lane obstacle near
+    ``ROADKILL_OBSTACLE_Y_PX``; main-road samples use a smooth left-lane lateral reference, begin merging
+    early (``ROADKILL_APPROACH_LEAD_S`` at ``SIM_SPEED_M_S``), and return to the right lane on a short
+    exit ramp (same as ``simulate`` / ``lateral_offset_px_avoid_roadkill``).
+
     **Off-ramp:** when ``OFFRAMP_ENABLE`` and ``DATASET_OFFRAMP_LABELS_ENABLE``, also writes
     ``train/offramp_*.jpg`` / ``test/offramp_*.jpg`` with ``take_offramp=1`` and κ from the Bézier.
     Sample positions use arc-length spacing along the Bézier when ``DATASET_SAMPLE_UNIFORM_ALONG_ROAD`` is true.
@@ -378,16 +385,17 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES, num_test=cfg.NUM_TEST_FRAMES):
         match_spacing=cfg.DATASET_OFFRAMP_MATCH_MAIN_SPACING,
     )
 
-    # Right-lane center, heading = road tangent (no lateral/yaw noise unless perturbation σ > 0).
+    # Right-lane center except roadkill detour; heading = road tangent (no lateral/yaw noise unless σ > 0).
     for i, yf in enumerate(train_y):
         road_x = dw.get_road_center(yf)
         dxdY = float(dw.cs(yf, nu=1))
+        lat_px = lateral_offset_px_avoid_roadkill(float(yf), right_lane_offset_px)
         view = get_perspective_view(
             world,
             yf,
             road_x,
             dxdY,
-            lateral_offset_px=right_lane_offset_px,
+            lateral_offset_px=lat_px,
             yaw_offset_rad=0.0,
         )
         if view is None:
@@ -414,7 +422,7 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES, num_test=cfg.NUM_TEST_FRAMES):
                 yf,
                 road_x,
                 dxdY,
-                right_lane_offset_px,
+                lateral_offset_px_avoid_roadkill(float(yf), right_lane_offset_px),
                 dw.px_per_m,
                 rng,
                 cfg.PERTURB_LATERAL_STD_M,
@@ -446,7 +454,7 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES, num_test=cfg.NUM_TEST_FRAMES):
                     yf,
                     road_x,
                     dxdY,
-                    right_lane_offset_px,
+                    lateral_offset_px_avoid_roadkill(float(yf), right_lane_offset_px),
                     dw.px_per_m,
                     rng,
                     cfg.PERTURB_LATERAL_STD_M,
@@ -503,12 +511,13 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES, num_test=cfg.NUM_TEST_FRAMES):
     for i, yf in enumerate(test_y):
         road_x = dw.get_road_center(yf)
         dxdY = float(dw.cs(yf, nu=1))
+        lat_px = lateral_offset_px_avoid_roadkill(float(yf), right_lane_offset_px)
         view = get_perspective_view(
             world,
             yf,
             road_x,
             dxdY,
-            lateral_offset_px=right_lane_offset_px,
+            lateral_offset_px=lat_px,
             yaw_offset_rad=0.0,
         )
         if view is None:
@@ -534,7 +543,7 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES, num_test=cfg.NUM_TEST_FRAMES):
                 yf,
                 road_x,
                 dxdY,
-                right_lane_offset_px,
+                lateral_offset_px_avoid_roadkill(float(yf), right_lane_offset_px),
                 dw.px_per_m,
                 rng_test,
                 cfg.PERTURB_LATERAL_STD_M,

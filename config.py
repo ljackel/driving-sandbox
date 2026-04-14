@@ -72,10 +72,11 @@ SPLINE_NUM_CONTROL_POINTS = 11
 # Length must match SPLINE_NUM_CONTROL_POINTS. Order: bottom (large y) → top (small y).
 # More points + alternating Δ → about twice as many bends as the old 6-point S-curve (stay ~±260 px).
 # CubicSpline: dx/dy=0 at bottom (large y). Larger |Δ| = curvier road (stay within ~±260 px of center).
+# First bend (second and third knots from bottom) scaled to 0.25× amplitude vs the original S-curve.
 SPLINE_X_DELTAS_BOTTOM_TO_TOP = (
     0,
-    108,
-    -48,
+    27,
+    -12,
     104,
     -52,
     100,
@@ -107,6 +108,28 @@ DASH_GAP_METERS = 3.0
 WORLD_GREEN_BGR = (34, 139, 34)
 WORLD_ROAD_BGR = (40, 40, 40)
 ROAD_EDGE_THICKNESS = 1
+# Flattened "roadkill" obstacle in the **right** lane at a fixed BEV row; training/sim shift the ego
+# reference to the **left** lane with smooth merges (see ``roadkill_left_lane_blend_weight``).
+ROADKILL_ENABLE = True
+ROADKILL_OBSTACLE_Y_PX = 850.0
+# Half-height (px) of the band where the ego uses the left lane at full strength.
+ROADKILL_DETOUR_CORE_HALF_PX = 38.0
+# Blend ramp on the **approach** side (larger ``y``, before the obstacle): ego starts moving left over this
+# many pixels in ``y``, after an optional time lead (see ``ROADKILL_APPROACH_LEAD_S``).
+ROADKILL_DETOUR_BLEND_PX = 55.0
+# Start the approach blend this many **seconds** sooner along the road (distance =
+# ``SIM_SPEED_M_S * ROADKILL_APPROACH_LEAD_S`` meters → px via ``WORLD_IMAGE_SIZE / WORLD_METERS``).
+ROADKILL_APPROACH_LEAD_S = 1.0
+# Blend ramp on the **exit** side (smaller ``y``, after the obstacle): shorter → back to right lane quickly.
+ROADKILL_DETOUR_BLEND_EXIT_PX = 14.0
+# Ellipse half-axes (px) for splat art; ``generate_world`` clamps so the across-road size stays inside
+# one lane (see ``ROADKILL_ACROSS_MAX_FRAC_OF_LANE``).
+ROADKILL_ALONG_ROAD_HALF_PX = 14.0
+ROADKILL_ACROSS_ROAD_HALF_PX = 3.0
+# Max fraction of ``LANE_WIDTH_METERS * px_per_m`` for the splat semi-axis across the road (right lane only).
+ROADKILL_ACROSS_MAX_FRAC_OF_LANE = 0.38
+# Max multiple of lane width for along-road semi-axis (elongated but not huge).
+ROADKILL_ALONG_MAX_LANE_WIDTHS = 2.2
 # Off-ramp geometry (see ``OFFRAMP_ENABLE`` in switches): branch on main centerline; image-row fraction
 # (0 = top, 1 = bottom). Must be > 0.5 for bottom-half exit; ignored otherwise.
 OFFRAMP_BRANCH_Y_FRAC = 0.78
@@ -320,6 +343,12 @@ SIM_STOP_WHEN_REACHES_MAP_TOP = True
 # Meters from centerline toward driver's right; must match ``generate_dataset`` camera offset
 # (``LANE_WIDTH_METERS * DATASET_RIGHT_LANE_LATERAL_FRAC``). Pixels = this × ``px_per_m`` in sim.
 SIM_EGO_LATERAL_OFFSET_M = LANE_WIDTH_METERS * DATASET_RIGHT_LANE_LATERAL_FRAC
+# Live BEV / ``sim_path.png``: top-down ego footprint (meters, full scale on the map).
+SIM_BEV_EGO_CAR_WIDTH_M = 1.5
+SIM_BEV_EGO_CAR_LENGTH_M = 3.0
+# If the true size in pixels is smaller than this length (px), scale the icon up uniformly
+# (keeps 1.5 m × 3 m proportions; set0 to always use exact map scale).
+SIM_BEV_EGO_CAR_MIN_DISPLAY_LEN_PX = 22.0
 # Start as low as possible: try y = h-1, then move up until perspective warp fits.
 SIM_START_MAX_INSET_PX = 200
 # First-person video from ``simulate.run_simulation`` (same resolution as ``CAMERA_IMAGE_SIZE``); gated by ``SIM_FP_VIDEO_ENABLE`` (switches above).
