@@ -341,7 +341,7 @@ SIM_REALTIME_WINDOW_GAP_PX = 32
 SIM_REALTIME_BEV_WAIT_MS = 1
 # Extra pause (ms) per step **when a live OpenCV window is shown** (easier to follow; does not change physics).
 # Physics timing is still ``SIM_DT`` / ``SIM_SPEED_M_S``; to slow the integrated roll-out itself, change those.
-SIM_REALTIME_STEP_PAUSE_MS = 30
+SIM_REALTIME_STEP_PAUSE_MS =8
 # BEV on-map speed bar (drag): position / ``SIM_REALTIME_SPEED_TRACKBAR_CENTER`` scales arc-length step per
 # roll-out iteration (100 = nominal ``SIM_SPEED_M_S * SIM_DT`` in px). Names are legacy from cv2 trackbars.
 SIM_REALTIME_SPEED_TRACKBAR_MAX = 200
