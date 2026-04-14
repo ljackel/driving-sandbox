@@ -20,6 +20,13 @@ arc length along the Bézier when ``DATASET_SAMPLE_UNIFORM_ALONG_ROAD``; counts 
 With ``SIM_FP_VIDEO_ENABLE``,
 each driver crop is written to ``sim_first_person.mp4`` (same preprocessing as the model when
 ``PERSPECTIVE_INPUT_BOTTOM_HALF_ONLY`` is true: bottom half of the warp, resized to ``CAMERA_IMAGE_SIZE``).
+With ``SIM_REALTIME_BEV`` / ``SIM_REALTIME_DRIVER_VIEW``, live OpenCV windows show the map trail and/or
+the ego camera (same crop as the model). **Pause** freezes the roll-out (Space, ``p``, or the **Pause**
+button on each window); **Resume** continues. Press ``q`` to stop, or **Ctrl+C** in the terminal
+(focus may need to be on the terminal; live windows use short ``waitKey`` polls so Ctrl+C can interrupt).
+Windows are tiled
+left-to-right (BEV then driver) using ``SIM_REALTIME_WINDOW_*`` so they do not overlap.
+Use ``SIM_REALTIME_STEP_PAUSE_MS`` (and ``SIM_REALTIME_BEV_WAIT_MS``) to slow the live display.
 
 **Input crop:** ``PERSPECTIVE_INPUT_BOTTOM_HALF_ONLY`` matches ``train.py`` / ``evaluate_test.py`` (bottom
 half of the warp, then resize to ``CAMERA_IMAGE_SIZE``).
@@ -36,6 +43,9 @@ from __future__ import annotations
 
 import json
 import os
+import signal
+import sys
+import time
 
 import cv2
 import matplotlib.pyplot as plt
@@ -331,6 +341,163 @@ def _draw_offramp_train_sampling_bars_on_bev(
         _draw_lateral_sampling_bar(vis, qx, qy, psi, bar_half, orange_bgr)
 
 
+def _bev_realtime_frame(
+    world_bgr: np.ndarray,
+    path: list[tuple[float, float, float]],
+    x: float,
+    y: float,
+    psi_draw: float,
+    lateral_px: float,
+) -> np.ndarray:
+    """Bird's-eye frame for live display: centerline trail + ego at right-lane with heading arrow."""
+    vis = world_bgr.copy()
+    if len(path) >= 2:
+        pts = (
+            np.array([[p[0], p[1]] for p in path], dtype=np.float32)
+            .round()
+            .astype(np.int32)
+            .reshape(-1, 1, 2)
+        )
+        cv2.polylines(vis, [pts], False, (200, 200, 255), 2, cv2.LINE_AA)
+    qx, qy = _right_lane_overlay_xy(float(x), float(y), float(psi_draw), lateral_px)
+    qi = (int(round(qx)), int(round(qy)))
+    cv2.circle(vis, qi, 7, (0, 255, 0), -1, cv2.LINE_AA)
+    cv2.circle(vis, qi, 8, (255, 255, 255), 1, cv2.LINE_AA)
+    alen = 28.0
+    tip = (
+        int(round(qx + alen * float(np.cos(psi_draw)))),
+        int(round(qy + alen * float(np.sin(psi_draw)))),
+    )
+    cv2.arrowedLine(vis, qi, tip, (0, 255, 255), 2, cv2.LINE_AA, tipLength=0.22)
+    cv2.putText(
+        vis,
+        f"step {len(path) - 1}   Space pause   q quit   Ctrl+C (terminal)",
+        (10, 26),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.65,
+        (255, 255, 255),
+        2,
+        cv2.LINE_AA,
+    )
+    return vis
+
+
+def _rt_draw_pause_button(
+    img: np.ndarray, *, paused: bool
+) -> tuple[int, int, int, int]:
+    """Draw a compact Pause / Resume control in the top-right; returns hit-test ``(x1,y1,x2,y2)``."""
+    h, w = img.shape[:2]
+    label = "Resume" if paused else "Pause"
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    scale = 0.38
+    thick = 1
+    (tw, th), _ = cv2.getTextSize(label, font, scale, thick)
+    pad_x, pad_y = 3, 2
+    margin = 5
+    bw = tw + 2 * pad_x
+    bh = th + 2 * pad_y
+    x2 = w - margin
+    x1 = max(margin, x2 - bw)
+    y1 = margin
+    y2 = min(h - margin, y1 + bh)
+    if y2 <= y1:
+        return (-1, -1, -2, -2)
+    cv2.rectangle(img, (x1, y1), (x2, y2), (45, 45, 45), -1, cv2.LINE_AA)
+    cv2.rectangle(img, (x1, y1), (x2, y2), (220, 220, 220), 1, cv2.LINE_AA)
+    tx = int(x1 + (x2 - x1 - tw) // 2)
+    ty = int(y1 + (y2 - y1 + th) // 2)
+    cv2.putText(
+        img,
+        label,
+        (tx, ty),
+        font,
+        scale,
+        (240, 240, 240),
+        thick,
+        cv2.LINE_AA,
+    )
+    return x1, y1, x2, y2
+
+
+def _rt_draw_paused_banner(img: np.ndarray) -> None:
+    h, w = img.shape[:2]
+    cv2.putText(
+        img,
+        "PAUSED",
+        (max(8, w // 2 - 120), max(36, h // 8)),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        1.1,
+        (0, 220, 255),
+        2,
+        cv2.LINE_AA,
+    )
+
+
+def _rt_mouse_bev(event: int, x: int, y: int, flags: int, ui: dict) -> None:
+    # ``LBUTTONUP`` avoids spurious ``DOWN`` events when the window grabs focus (would toggle pause).
+    if event != cv2.EVENT_LBUTTONUP:
+        return
+    if int(ui.get("sim_step", 0)) < 2:
+        return
+    x1, y1, x2, y2 = ui["bev_rect"]
+    if x2 <= x1 or y2 <= y1:
+        return
+    if x1 <= x <= x2 and y1 <= y <= y2:
+        ui["toggle"] = True
+
+
+def _rt_mouse_drv(event: int, x: int, y: int, flags: int, ui: dict) -> None:
+    if event != cv2.EVENT_LBUTTONUP:
+        return
+    if int(ui.get("sim_step", 0)) < 2:
+        return
+    x1, y1, x2, y2 = ui["drv_rect"]
+    if x2 <= x1 or y2 <= y1:
+        return
+    if x1 <= x <= x2 and y1 <= y <= y2:
+        ui["toggle"] = True
+
+
+def _rt_wait_key_interruptible(delay_ms: int, interrupt_flag: list) -> int:
+    """
+    Like ``cv2.waitKey(delay_ms)`` but avoids a single unbounded native wait: when
+    ``delay_ms <= 0`` (step-through mode), polls in chunks so Python can handle Ctrl+C.
+    """
+    if interrupt_flag[0]:
+        return -1
+    chunk_ms = 30
+    if delay_ms <= 0:
+        while not interrupt_flag[0]:
+            key_raw = int(cv2.waitKey(chunk_ms))
+            if key_raw >= 0:
+                return key_raw
+        return -1
+    waited = 0
+    while waited < delay_ms and not interrupt_flag[0]:
+        step = int(min(chunk_ms, delay_ms - waited))
+        key_raw = int(cv2.waitKey(max(1, step)))
+        if key_raw >= 0:
+            return key_raw
+        waited += step
+    return -1
+
+
+def _tile_realtime_sim_windows(
+    fr_bev: np.ndarray | None,
+    fr_drv: np.ndarray | None,
+) -> None:
+    """Place BEV left, driver camera right, using image widths so the frames do not overlap."""
+    ox = int(cfg.SIM_REALTIME_WINDOW_ORIGIN_X)
+    oy = int(cfg.SIM_REALTIME_WINDOW_ORIGIN_Y)
+    gap = int(cfg.SIM_REALTIME_WINDOW_GAP_PX)
+    x = ox
+    if fr_bev is not None:
+        cv2.moveWindow(cfg.SIM_REALTIME_BEV_WINDOW, x, oy)
+        x += int(fr_bev.shape[1]) + gap
+    if fr_drv is not None:
+        cv2.moveWindow(cfg.SIM_REALTIME_DRIVER_WINDOW, x, oy)
+
+
 def _sim_arc_y_bounds(h: int, margin: float) -> tuple[float, float]:
     """
     Vertical range for centerline arc integration: top inset ``margin`` (same as dataset / early stop),
@@ -544,100 +711,313 @@ def run_simulation() -> tuple[
             x, y = x0, y0
             path[0] = (x0, y0, psi)
 
-    for _ in range(cfg.SIM_MAX_STEPS):
-        if on_ramp:
-            ev_pose = dw.offramp_bezier_evolution(u_ramp)
-            if ev_pose is None:
-                break
-            _, (fx, fy), _ = ev_pose
-            psi_cam = float(np.arctan2(fy, fx))
-        else:
-            psi_cam = initial_heading_road_aligned(dw.cs, y)
-        view = get_view_from_pose(
-            world,
-            x,
-            y,
-            psi_cam,
-            lateral_px,
+    rt_window = False
+    rt_driver_window = False
+    rt_gui_disabled = False
+    rt_windows_placed = False
+    rt_sim_paused = False
+    rt_ui: dict = {
+        "toggle": False,
+        "bev_rect": (-1, -1, -2, -2),
+        "drv_rect": (-1, -1, -2, -2),
+        "sim_step": 0,
+    }
+    user_quit_rt = False
+    interrupt_rt = [False]
+
+    def _sim_sigint(_signum: int, _frame: object) -> None:
+        interrupt_rt[0] = True
+        print(
+            "\nCtrl+C: stopping simulation…",
+            file=sys.stderr,
         )
-        if view is None:
-            break
 
-        if fp_video_abs is not None:
-            vframe = _fp_video_frame_bgr(view)
-            vh, vw = vframe.shape[:2]
-            if video_writer is None:
-                video_writer = cv2.VideoWriter(
-                    fp_video_abs,
-                    cv2.VideoWriter_fourcc(*"mp4v"),
-                    float(cfg.SIM_VIDEO_FPS),
-                    (vw, vh),
-                )
-                if not video_writer.isOpened():
-                    print(
-                        f"Warning: could not open video writer for {fp_video_abs!r}; "
-                        "skipping first-person MP4."
-                    )
-                    fp_video_abs = None
-                    video_writer = None
-            if video_writer is not None:
-                video_writer.write(vframe)
+    try:
+        _prev_sigint = signal.signal(signal.SIGINT, _sim_sigint)
+    except ValueError:
+        _prev_sigint = None
 
-        with torch.no_grad():
-            inp = preprocess_bgr_for_model(view, device)
-            intent = 1.0 if cfg.SIM_TAKE_OFFRAMP else 0.0
-            take_t = torch.tensor([[intent]], device=device, dtype=inp.dtype)
-            steering = float(model(inp, take_t)[0, 0].item())
-
-        # Gain matches kappa_max * speed * px_per_m (see config._compute_sim_yaw_rate_gain).
-        psi += steering * cfg.SIM_YAW_RATE_GAIN * cfg.SIM_DT
-        if cfg.SIM_PROJECT_REF_ONTO_MAIN_ROAD:
-            if follow_ramp_geom and on_ramp:
-                step_r = dw.offramp_step_arc_px(u_ramp, step_dist_px)
-                if step_r is None:
-                    break
-                u_ramp, x, y = step_r
-            elif follow_ramp_geom and not on_ramp:
-                y_before = float(y)
-                x, y = _advance_main_centerline_arc_px(
-                    dw, y, step_dist_px, margin=margin, h=h
-                )
-                if y_before > y_branch + 1e-9 and float(y) <= y_branch + 1e-9:
-                    on_ramp = True
-                    u_ramp = 0.0
-                    ev_br = dw.offramp_bezier_evolution(0.0)
-                    if ev_br is None:
-                        break
-                    Bb, _, _ = ev_br
-                    x, y = float(Bb[0]), float(Bb[1])
-            else:
-                x, y = _advance_main_centerline_arc_px(
-                    dw, y, step_dist_px, margin=margin, h=h
-                )
-        else:
-            x += step_dist_px * np.cos(psi)
-            y += step_dist_px * np.sin(psi)
-        wb = float(cfg.SIM_BLEND_PSI_TO_MAIN_ROAD)
-        if wb > 0.0:
+    try:
+        for sim_i in range(cfg.SIM_MAX_STEPS):
+            if interrupt_rt[0]:
+                user_quit_rt = True
+                break
+            rt_ui["sim_step"] = sim_i
             if on_ramp:
-                evb = dw.offramp_bezier_evolution(u_ramp)
-                if evb is not None:
-                    _, (bx, by), _ = evb
-                    psi = _blend_psi_toward(
-                        psi, float(np.arctan2(by, bx)), wb
+                ev_pose = dw.offramp_bezier_evolution(u_ramp)
+                if ev_pose is None:
+                    break
+                _, (fx, fy), _ = ev_pose
+                psi_cam = float(np.arctan2(fy, fx))
+            else:
+                psi_cam = initial_heading_road_aligned(dw.cs, y)
+            view = get_view_from_pose(
+                world,
+                x,
+                y,
+                psi_cam,
+                lateral_px,
+            )
+            if view is None:
+                break
+    
+            if fp_video_abs is not None:
+                vframe = _fp_video_frame_bgr(view)
+                vh, vw = vframe.shape[:2]
+                if video_writer is None:
+                    video_writer = cv2.VideoWriter(
+                        fp_video_abs,
+                        cv2.VideoWriter_fourcc(*"mp4v"),
+                        float(cfg.SIM_VIDEO_FPS),
+                        (vw, vh),
+                    )
+                    if not video_writer.isOpened():
+                        print(
+                            f"Warning: could not open video writer for {fp_video_abs!r}; "
+                            "skipping first-person MP4."
+                        )
+                        fp_video_abs = None
+                        video_writer = None
+                if video_writer is not None:
+                    video_writer.write(vframe)
+    
+            with torch.no_grad():
+                inp = preprocess_bgr_for_model(view, device)
+                intent = 1.0 if cfg.SIM_TAKE_OFFRAMP else 0.0
+                take_t = torch.tensor([[intent]], device=device, dtype=inp.dtype)
+                steering = float(model(inp, take_t)[0, 0].item())
+    
+            # Gain matches kappa_max * speed * px_per_m (see config._compute_sim_yaw_rate_gain).
+            psi += steering * cfg.SIM_YAW_RATE_GAIN * cfg.SIM_DT
+            if cfg.SIM_PROJECT_REF_ONTO_MAIN_ROAD:
+                if follow_ramp_geom and on_ramp:
+                    step_r = dw.offramp_step_arc_px(u_ramp, step_dist_px)
+                    if step_r is None:
+                        break
+                    u_ramp, x, y = step_r
+                elif follow_ramp_geom and not on_ramp:
+                    y_before = float(y)
+                    x, y = _advance_main_centerline_arc_px(
+                        dw, y, step_dist_px, margin=margin, h=h
+                    )
+                    if y_before > y_branch + 1e-9 and float(y) <= y_branch + 1e-9:
+                        on_ramp = True
+                        u_ramp = 0.0
+                        ev_br = dw.offramp_bezier_evolution(0.0)
+                        if ev_br is None:
+                            break
+                        Bb, _, _ = ev_br
+                        x, y = float(Bb[0]), float(Bb[1])
+                else:
+                    x, y = _advance_main_centerline_arc_px(
+                        dw, y, step_dist_px, margin=margin, h=h
                     )
             else:
-                psi = _blend_psi_toward(
-                    psi, initial_heading_road_aligned(dw.cs, y), wb
-                )
-        path.append((float(x), float(y), float(psi)))
+                x += step_dist_px * np.cos(psi)
+                y += step_dist_px * np.sin(psi)
+            wb = float(cfg.SIM_BLEND_PSI_TO_MAIN_ROAD)
+            if wb > 0.0:
+                if on_ramp:
+                    evb = dw.offramp_bezier_evolution(u_ramp)
+                    if evb is not None:
+                        _, (bx, by), _ = evb
+                        psi = _blend_psi_toward(
+                            psi, float(np.arctan2(by, bx)), wb
+                        )
+                else:
+                    psi = _blend_psi_toward(
+                        psi, initial_heading_road_aligned(dw.cs, y), wb
+                    )
+            path.append((float(x), float(y), float(psi)))
+    
+            if on_ramp:
+                ev_draw = dw.offramp_bezier_evolution(u_ramp)
+                if ev_draw is not None:
+                    _, (fxd, fyd), _ = ev_draw
+                    psi_draw = float(np.arctan2(fyd, fxd))
+                else:
+                    psi_draw = psi_cam
+            else:
+                psi_draw = initial_heading_road_aligned(dw.cs, y)
+    
+            live_bev = cfg.SIM_REALTIME_BEV and not rt_gui_disabled
+            live_drv = cfg.SIM_REALTIME_DRIVER_VIEW and not rt_gui_disabled
+            if live_bev or live_drv:
+                try:
+                    view_live = get_view_from_pose(
+                        world, x, y, psi_draw, lateral_px
+                    )
+                    if view_live is None:
+                        break
+                    vframe = _fp_video_frame_bgr(view_live)
+                    fr: np.ndarray | None = None
+                    drv: np.ndarray | None = None
+                    if live_drv:
+                        if not rt_driver_window:
+                            cv2.namedWindow(
+                                cfg.SIM_REALTIME_DRIVER_WINDOW,
+                                cv2.WINDOW_NORMAL,
+                            )
+                            rt_driver_window = True
+                            cv2.setMouseCallback(
+                                cfg.SIM_REALTIME_DRIVER_WINDOW,
+                                _rt_mouse_drv,
+                                rt_ui,
+                            )
+                        drv = vframe.copy()
+                        dh, drv_w = drv.shape[:2]
+                        font = cv2.FONT_HERSHEY_SIMPLEX
+                        # Small model input (e.g. 128²): scale to image height; shrink if wider than frame.
+                        steer_scale = max(0.28, min(0.5, float(dh) / 320.0))
+                        hint_scale = max(0.24, min(0.42, float(dh) / 360.0))
+                        thick = 1
+                        steer_txt = f"s{steering:+.3f}"
+                        (tw, _), _ = cv2.getTextSize(steer_txt, font, steer_scale, thick)
+                        if tw > drv_w - 4:
+                            steer_scale *= (drv_w - 4) / float(max(tw, 1))
+                        # ``putText`` origin is bottom-left of baseline; place lines by fraction of height.
+                        y_steer = max(13, int(round(0.14 * dh)))
+                        y_hint = min(dh - 3, max(y_steer + 8, int(round(0.26 * dh))))
+                        cv2.putText(
+                            drv,
+                            steer_txt,
+                            (2, y_steer),
+                            font,
+                            steer_scale,
+                            (0, 255, 0),
+                            thick,
+                            cv2.LINE_AA,
+                        )
+                        cv2.putText(
+                            drv,
+                            "Space/btn pause  q quit  Ctrl+C",
+                            (2, y_hint),
+                            font,
+                            hint_scale,
+                            (255, 255, 255),
+                            thick,
+                            cv2.LINE_AA,
+                        )
+                    if live_bev:
+                        if not rt_window:
+                            cv2.namedWindow(
+                                cfg.SIM_REALTIME_BEV_WINDOW, cv2.WINDOW_NORMAL
+                            )
+                            rt_window = True
+                            cv2.setMouseCallback(
+                                cfg.SIM_REALTIME_BEV_WINDOW,
+                                _rt_mouse_bev,
+                                rt_ui,
+                            )
+                        fr = _bev_realtime_frame(
+                            world, path, x, y, psi_draw, lateral_px
+                        )
+                    if not rt_windows_placed:
+                        _tile_realtime_sim_windows(fr, drv)
+                        rt_windows_placed = True
+    
+                    pause_ms = int(cfg.SIM_REALTIME_STEP_PAUSE_MS)
+                    while True:
+                        rt_ui["toggle"] = False
+                        paused = rt_sim_paused
+                        fr_disp = fr.copy() if fr is not None else None
+                        drv_disp = drv.copy() if drv is not None else None
+                        if fr_disp is not None:
+                            if paused:
+                                _rt_draw_paused_banner(fr_disp)
+                            rt_ui["bev_rect"] = _rt_draw_pause_button(
+                                fr_disp, paused=paused
+                            )
+                        if drv_disp is not None:
+                            if paused:
+                                _rt_draw_paused_banner(drv_disp)
+                            rt_ui["drv_rect"] = _rt_draw_pause_button(
+                                drv_disp, paused=paused
+                            )
+                        if fr_disp is not None:
+                            cv2.imshow(cfg.SIM_REALTIME_BEV_WINDOW, fr_disp)
+                        if drv_disp is not None:
+                            cv2.imshow(cfg.SIM_REALTIME_DRIVER_WINDOW, drv_disp)
 
-        if on_ramp and u_ramp >= 1.0 - 1e-8:
-            break
-        if (not on_ramp) and cfg.SIM_STOP_WHEN_REACHES_MAP_TOP and float(y) <= margin:
-            break
-        if x < 0 or x >= w or y < 0 or float(y) >= float(h):
-            break
+                        wk = (
+                            30
+                            if paused
+                            else max(0, int(cfg.SIM_REALTIME_BEV_WAIT_MS))
+                        )
+                        key_raw = _rt_wait_key_interruptible(wk, interrupt_rt)
+                        key_ch = None if key_raw < 0 else (key_raw & 0xFF)
+                        clicked = bool(rt_ui["toggle"])
+                        rt_ui["toggle"] = False
+                        if interrupt_rt[0]:
+                            user_quit_rt = True
+                            break
+                        if key_ch == ord("q"):
+                            user_quit_rt = True
+                            break
+                        if (
+                            key_ch is not None
+                            and key_ch in (ord(" "), ord("p"))
+                        ) or clicked:
+                            rt_sim_paused = not rt_sim_paused
+                            if rt_sim_paused:
+                                continue
+                            break
+                        if not rt_sim_paused:
+                            break
+                        continue
+                    if user_quit_rt:
+                        break
+                    if pause_ms > 0 and not interrupt_rt[0]:
+                        rem = pause_ms / 1000.0
+                        while rem > 0 and not interrupt_rt[0]:
+                            chunk = min(0.02, rem)
+                            time.sleep(chunk)
+                            rem -= chunk
+                        if interrupt_rt[0]:
+                            user_quit_rt = True
+                    if user_quit_rt:
+                        break
+                except cv2.error:
+                    if not rt_gui_disabled:
+                        print(
+                            "Warning: live display failed (no GUI / OpenCV backend?). "
+                            "Set SIM_REALTIME_BEV / SIM_REALTIME_DRIVER_VIEW False in config.py. "
+                            "Disabling for this run."
+                        )
+                    rt_gui_disabled = True
+                    if rt_window:
+                        try:
+                            cv2.destroyWindow(cfg.SIM_REALTIME_BEV_WINDOW)
+                        except cv2.error:
+                            pass
+                        rt_window = False
+                    if rt_driver_window:
+                        try:
+                            cv2.destroyWindow(cfg.SIM_REALTIME_DRIVER_WINDOW)
+                        except cv2.error:
+                            pass
+                        rt_driver_window = False
+    
+            if on_ramp and u_ramp >= 1.0 - 1e-8:
+                break
+            if (not on_ramp) and cfg.SIM_STOP_WHEN_REACHES_MAP_TOP and float(y) <= margin:
+                break
+            if x < 0 or x >= w or y < 0 or float(y) >= float(h):
+                break
+    finally:
+        if _prev_sigint is not None:
+            signal.signal(signal.SIGINT, _prev_sigint)
+
+    if rt_window:
+        try:
+            cv2.destroyWindow(cfg.SIM_REALTIME_BEV_WINDOW)
+        except cv2.error:
+            pass
+    if rt_driver_window:
+        try:
+            cv2.destroyWindow(cfg.SIM_REALTIME_DRIVER_WINDOW)
+        except cv2.error:
+            pass
 
     if video_writer is not None:
         if on_ramp:
@@ -789,7 +1169,15 @@ def main() -> None:
     )
     plt.axis("off")
     plt.tight_layout()
-    plt.show()
+    plt.show(block=False)
+    try:
+        fig = plt.gcf()
+        while plt.fignum_exists(fig.number):
+            plt.pause(0.2)
+    except KeyboardInterrupt:
+        print("\nInterrupted (matplotlib summary).", file=sys.stderr)
+    finally:
+        plt.close("all")
 
 
 if __name__ == "__main__":

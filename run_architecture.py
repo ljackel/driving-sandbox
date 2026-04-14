@@ -7,10 +7,51 @@ import os
 
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
+import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 import config as cfg
 from driving_model import DrivingNet
+
+
+class _DrivingNetOnnxFriendly(nn.Module):
+    """
+    Same parameters as a transformer ``DrivingNet``; ``forward`` matches training except
+    ``AdaptiveAvgPool2d`` is replaced by bilinear ``interpolate`` to ``(p, p)`` so the legacy
+    ONNX exporter accepts the graph (Netron visualization only—pooling math differs slightly).
+    """
+
+    def __init__(self, src: DrivingNet) -> None:
+        super().__init__()
+        if not src.use_transformer:
+            raise ValueError("Use DrivingNet directly when not using the transformer head.")
+        self.backbone = src.backbone
+        self.p = int(src.token_grid)
+        self.input_proj = src.input_proj
+        self.pos_embed = src.pos_embed
+        self.encoder = src.encoder
+        self.head = src.head
+
+    def forward(self, x: torch.Tensor, take_offramp: torch.Tensor) -> torch.Tensor:
+        if take_offramp.dim() == 1:
+            take_offramp = take_offramp.unsqueeze(1)
+        take_offramp = take_offramp.to(dtype=x.dtype)
+        x = self.backbone(x)
+        x = F.interpolate(
+            x,
+            size=(self.p, self.p),
+            mode="bilinear",
+            align_corners=False,
+        )
+        _b, _c, _h, _w = x.shape
+        x = x.flatten(2).transpose(1, 2)
+        x = self.input_proj(x)
+        x = x + self.pos_embed
+        x = self.encoder(x)
+        x = x.mean(dim=1)
+        x = torch.cat([x, take_offramp], dim=1)
+        return self.head(x)
 
 
 def _fmt_int(n: int) -> str:
@@ -180,9 +221,59 @@ def _write_architecture_png(path: str, model: DrivingNet, rows: list[tuple[str, 
     plt.close(fig)
 
 
+def export_drivingnet_onnx(model: DrivingNet, onnx_path: str) -> tuple[bool, str]:
+    """
+    Export ``DrivingNet`` to ONNX for [Netron](https://github.com/lutzroeder/netron).
+
+    Two graph inputs: ``image`` (N, 3, H, H), ``take_offramp`` (N, 1). Output: ``out`` (N, MODEL_OUTPUT_DIM).
+
+    Temporarily moves the model to CPU for export, then restores device and ``train()`` / ``eval()``
+    so callers (e.g. ``train.py``) are not left with weights on CPU while batches are on CUDA.
+
+    Returns:
+        ``(True, "")`` on success, or ``(False, error message)``.
+    """
+    orig_device = next(model.parameters()).device
+    was_training = model.training
+    model.eval()
+    h = int(cfg.CAMERA_IMAGE_SIZE)
+    cpu = torch.device("cpu")
+    try:
+        m = model.to(cpu)
+        export_body: nn.Module = (
+            _DrivingNetOnnxFriendly(m) if m.use_transformer else m
+        )
+        dummy_x = torch.randn(1, 3, h, h, device=cpu)
+        dummy_take = torch.zeros(1, 1, device=cpu)
+        export_kw: dict = dict(
+            model=export_body,
+            args=(dummy_x, dummy_take),
+            f=onnx_path,
+            input_names=["image", "take_offramp"],
+            output_names=["out"],
+            dynamic_axes={
+                "image": {0: "batch"},
+                "take_offramp": {0: "batch"},
+                "out": {0: "batch"},
+            },
+            opset_version=17,
+        )
+        try:
+            torch.onnx.export(**export_kw, dynamo=False)
+        except TypeError:
+            torch.onnx.export(**export_kw)
+        return True, ""
+    except Exception as e:
+        return False, f"{type(e).__name__}: {e}"
+    finally:
+        model.to(orig_device)
+        model.train(was_training)
+
+
 def write_architecture_artifacts(run_dir: str, model: nn.Module) -> None:
     """
-    Write ``architecture.md`` (Mermaid + table) and ``architecture.png`` under ``run_dir``.
+    Write ``architecture.md`` (Mermaid + table), ``architecture.png``, and ``driving_net.onnx``
+    (for Netron) under ``run_dir``.
 
     Expects a ``DrivingNet`` instance; raises ``TypeError`` otherwise.
     """
@@ -229,6 +320,46 @@ def write_architecture_artifacts(run_dir: str, model: nn.Module) -> None:
             "",
         ]
     )
+
+    onnx_path = os.path.join(run_dir, "driving_net.onnx")
+    onnx_ok, onnx_err = export_drivingnet_onnx(model, onnx_path)
+    if onnx_ok:
+        pool_note = (
+            ""
+            if not model.use_transformer
+            else (
+                "\n\nWith the **transformer** head, ONNX uses **bilinear resize** to the token grid "
+                "instead of `AdaptiveAvgPool2d` (legacy exporter limitation). Graph topology and weights "
+                "match; use this file for **visualization**, not bit-identical inference."
+            )
+        )
+        lines.extend(
+            [
+                "## Netron",
+                "",
+                f"Open **`{os.path.basename(onnx_path)}`** from this folder in [Netron](https://netron.app) "
+                "(desktop app or browser). Install **`onnx`** if export failed (`pip install onnx`).",
+                "",
+                "- Inputs: **`image`** `(batch, 3, H, H)`, **`take_offramp`** `(batch, 1)` — off-ramp control is **not** part of the image tensor.",
+                "- Output: **`out`**; steering is `[:, 0]`.",
+                pool_note,
+                "",
+            ]
+        )
+    else:
+        err_path = os.path.join(run_dir, "onnx_export_error.txt")
+        with open(err_path, "w", encoding="utf-8") as ef:
+            ef.write(onnx_err)
+        lines.extend(
+            [
+                "## Netron",
+                "",
+                f"ONNX export failed ({onnx_err}). Details: `{os.path.basename(err_path)}`. "
+                "Try `pip install onnx` and re-run training, or upgrade PyTorch.",
+                "",
+            ]
+        )
+
     with open(md_path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
 

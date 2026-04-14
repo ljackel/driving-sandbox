@@ -111,9 +111,11 @@ run_dir = os.path.join(_root, cfg.RUNS_DIR, _run_stamp)
 os.makedirs(run_dir, exist_ok=True)
 _write_latest_run_pointer(_root, run_dir, "in_progress")
 write_architecture_artifacts(run_dir, model)
+_onnx_p = os.path.join(run_dir, "driving_net.onnx")
 print(
-    f"Wrote architecture diagram: {os.path.join(run_dir, 'architecture.md')!r} "
-    f"and {os.path.join(run_dir, 'architecture.png')!r}"
+    f"Wrote architecture: {os.path.join(run_dir, 'architecture.md')!r}, "
+    f"{os.path.join(run_dir, 'architecture.png')!r}, "
+    f"Netron ONNX {_onnx_p!r} (if export succeeded; else see onnx_export_error.txt)"
 )
 
 # 5. The Training Loop

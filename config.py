@@ -56,7 +56,7 @@ SIM_FP_VIDEO_ENABLE = True
 OFFRAMP_ENABLE = True
 # Simulation: DrivingNet ``take_offramp`` input (1 = ramp intent; 0 = stay on main).
 # Off-ramp **geometry** in sim also needs ``SIM_PROJECT_REF_ONTO_MAIN_ROAD`` (see below).
-SIM_TAKE_OFFRAMP = True
+SIM_TAKE_OFFRAMP = False
 # Simulation: advance the centerline reference by arc length along the main spline (and off-ramp Bézier when
 # ``SIM_TAKE_OFFRAMP``). Avoids ``cos/sin(psi)`` + ``x=cs(y)`` chord errors. False = free BC integration (no ramp path).
 SIM_PROJECT_REF_ONTO_MAIN_ROAD = True
@@ -326,6 +326,22 @@ SIM_START_MAX_INSET_PX = 200
 SIM_FP_VIDEO_FILENAME = "sim_first_person.mp4"
 # Playback speed matches one simulation step per frame (``1 / SIM_DT``).
 SIM_VIDEO_FPS = 1.0 / SIM_DT
+# Live bird's-eye map during ``simulate.run_simulation`` (``cv2.imshow``). Press ``q`` in a window to stop early.
+# Set false for headless / no-display environments.
+SIM_REALTIME_BEV = True
+SIM_REALTIME_BEV_WINDOW = "BEV — ego on map"
+# Separate window: ego perspective crop (same preprocessing as the network: ``_fp_video_frame_bgr``).
+SIM_REALTIME_DRIVER_VIEW = True
+SIM_REALTIME_DRIVER_WINDOW = "Driver — ego camera"
+# Initial top-left corner (screen px) for the first live window; second is placed to the right with a gap.
+SIM_REALTIME_WINDOW_ORIGIN_X = 40
+SIM_REALTIME_WINDOW_ORIGIN_Y = 40
+SIM_REALTIME_WINDOW_GAP_PX = 32
+# ``cv2.waitKey`` delay (ms) per step after updating live windows; ``0`` = block until a key each step.
+SIM_REALTIME_BEV_WAIT_MS = 1
+# Extra pause (ms) per step **when a live OpenCV window is shown** (easier to follow; does not change physics).
+# Physics timing is still ``SIM_DT`` / ``SIM_SPEED_M_S``; to slow the integrated roll-out itself, change those.
+SIM_REALTIME_STEP_PAUSE_MS = 30
 
 # --- Dummy data (generate_dummy_data.py) ---
 DUMMY_NUM_SAMPLES = 100
