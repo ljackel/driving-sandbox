@@ -19,17 +19,26 @@ def _fmt_int(n: int) -> str:
 
 def driving_net_parameter_rows(model: DrivingNet) -> tuple[list[tuple[str, int]], int, int]:
     """Named blocks, total params, trainable params."""
-    rows: list[tuple[str, int]] = [
-        ("backbone (2× Conv2d + ReLU)", sum(p.numel() for p in model.backbone.parameters())),
-        (f"adaptive_avg_pool ({model.token_grid}×{model.token_grid})", 0),
-        ("input_proj (Linear)", sum(p.numel() for p in model.input_proj.parameters())),
-        ("pos_embed (learned)", int(model.pos_embed.numel())),
-        (
-            f"transformer_encoder ({cfg.MODEL_TRANSFORMER_NUM_LAYERS} layers)",
-            sum(p.numel() for p in model.encoder.parameters()),
-        ),
-        ("head (Linear)", sum(p.numel() for p in model.head.parameters())),
-    ]
+    if model.use_transformer:
+        rows: list[tuple[str, int]] = [
+            ("backbone (2× Conv2d + ReLU)", sum(p.numel() for p in model.backbone.parameters())),
+            (f"adaptive_avg_pool ({model.token_grid}×{model.token_grid})", 0),
+            ("input_proj (Linear)", sum(p.numel() for p in model.input_proj.parameters())),
+            ("pos_embed (learned)", int(model.pos_embed.numel())),
+            (
+                f"transformer_encoder ({cfg.MODEL_TRANSFORMER_NUM_LAYERS} layers)",
+                sum(p.numel() for p in model.encoder.parameters()),
+            ),
+            ("head (Linear)", sum(p.numel() for p in model.head.parameters())),
+        ]
+    else:
+        rows = [
+            ("backbone (2× Conv2d + ReLU)", sum(p.numel() for p in model.backbone.parameters())),
+            (
+                f"MLP (Flatten + 2×{cfg.MODEL_FC_HIDDEN_DIM} + out)",
+                sum(p.numel() for p in model.mlp_head.parameters()),
+            ),
+        ]
     total = sum(n for _, n in rows)
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     return rows, total, trainable
@@ -39,13 +48,28 @@ def _mermaid_block(model: DrivingNet) -> str:
     h = cfg.CAMERA_IMAGE_SIZE
     c1, c2 = cfg.MODEL_CONV1_CHANNELS, cfg.MODEL_CONV2_CHANNELS
     k, s = cfg.MODEL_KERNEL_SIZE, cfg.MODEL_STRIDE
+    out = cfg.MODEL_OUTPUT_DIM
+    if not model.use_transformer:
+        fh = cfg.MODEL_FLATTEN_DIM
+        hd = cfg.MODEL_FC_HIDDEN_DIM
+        return f"""flowchart TB
+  IN["Input: (N, 3, {h}, {h})"]
+  subgraph CNN["CNN backbone"]
+    C1["Conv2d 3→{c1}, k={k}, s={s} + ReLU"]
+    C2["Conv2d {c1}→{c2}, k={k}, s={s} + ReLU"]
+  end
+  FL["Flatten → {fh}"]
+  M1["Linear {fh}→{hd} + ReLU"]
+  M2["Linear {hd}→{hd} + ReLU"]
+  OUT["Linear {hd}→{out} (steering = [:,0])"]
+  IN --> C1 --> C2 --> FL --> M1 --> M2 --> OUT
+"""
     p = model.token_grid
     t = model.num_tokens
     d = cfg.MODEL_TRANSFORMER_D_MODEL
     L = cfg.MODEL_TRANSFORMER_NUM_LAYERS
     nh = cfg.MODEL_TRANSFORMER_NHEAD
     ff = cfg.MODEL_TRANSFORMER_FF_DIM
-    out = cfg.MODEL_OUTPUT_DIM
     return f"""flowchart TB
   IN["Input: (N, 3, {h}, {h})"]
   subgraph CNN["CNN backbone"]
@@ -123,8 +147,11 @@ def write_architecture_artifacts(run_dir: str, model: nn.Module) -> None:
     md_path = os.path.join(run_dir, "architecture.md")
     png_path = os.path.join(run_dir, "architecture.png")
 
+    head_name = "Transformer head" if model.use_transformer else "MLP head (2 FC hidden)"
     lines: list[str] = [
         "# DrivingNet architecture",
+        "",
+        f"- **Head:** {head_name} (`MODEL_USE_TRANSFORMER_HEAD={model.use_transformer}`)",
         "",
         f"- **Total parameters:** {_fmt_int(total)}",
         f"- **Trainable parameters:** {_fmt_int(trainable)}",

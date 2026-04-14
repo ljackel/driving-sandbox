@@ -12,7 +12,7 @@ Summary:
   crop (near-ego pixels), resized to ``CAMERA_IMAGE_SIZE``; otherwise the full crop is used.
 - **Labels:** Steering is ``kappa / max|kappa|`` over all CSV rows (``generate_dataset``). Lateral/yaw
   recentering applies to perturbed rows when ``DATASET_PERTURBATIONS_ENABLE`` is true and ``PERTURB_*`` σ > 0.
-- **Training:** MSE on ``DrivingNet`` channel 0 only (CNN + transformer head); see ``LEARNING_RATE``, ``EPOCHS``.
+- **Training:** MSE on ``DrivingNet`` channel 0 only (CNN + transformer or 2-layer MLP head); see ``MODEL_USE_TRANSFORMER_HEAD``, ``LEARNING_RATE``, ``EPOCHS``.
 - **Simulation:** ``SIM_YAW_RATE_GAIN`` from ``_compute_sim_yaw_rate_gain`` aligns ``psi += steering * gain * dt``
   with curvature step semantics on the train/test ``y`` grid. Optional first-person MP4: ``SIM_FP_VIDEO_*``.
 """
@@ -49,6 +49,21 @@ SPLINE_X_DELTAS_BOTTOM_TO_TOP = (
     -52,
     82,
     0,
+)
+# Knot heights: fractions from top (0) to bottom (1) of the map. Uneven steps → bends irregularly
+# along the road. Length must match SPLINE_NUM_CONTROL_POINTS; strictly increasing 0..1.
+SPLINE_Y_FRACTIONS_TOP_TO_BOTTOM = (
+    0.0,
+    0.026,
+    0.158,
+    0.191,
+    0.397,
+    0.431,
+    0.508,
+    0.800,
+    0.876,
+    0.912,
+    1.0,
 )
 ROAD_POLYLINE_SAMPLES = 2000
 LANE_WIDTH_METERS = 4.0
@@ -154,6 +169,9 @@ MODEL_CONV2_CHANNELS = 36
 MODEL_KERNEL_SIZE = 5
 MODEL_STRIDE = 2
 MODEL_NUM_CONV_BLOCKS = 2
+# If true: pooled spatial tokens + TransformerEncoder + linear head. If false: ``Flatten`` + two
+# hidden Linear layers (``MODEL_FC_HIDDEN_DIM``) + output Linear (legacy stack).
+MODEL_USE_TRANSFORMER_HEAD = False
 
 
 def _spatial_after_convs(
@@ -173,6 +191,8 @@ _MODEL_SPATIAL = _spatial_after_convs(
     CAMERA_IMAGE_SIZE, MODEL_NUM_CONV_BLOCKS, MODEL_KERNEL_SIZE, MODEL_STRIDE
 )
 MODEL_FLATTEN_DIM = MODEL_CONV2_CHANNELS * _MODEL_SPATIAL * _MODEL_SPATIAL
+# Hidden width for both fully connected layers when ``MODEL_USE_TRANSFORMER_HEAD`` is false.
+MODEL_FC_HIDDEN_DIM = 1000
 # CNN → ``AdaptiveAvgPool2d`` to this side length → ``token_grid²`` sequence tokens for the transformer head.
 MODEL_TRANSFORMER_TOKEN_GRID = 7
 MODEL_TRANSFORMER_D_MODEL = 128

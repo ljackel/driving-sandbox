@@ -27,7 +27,14 @@ class DrivingWorld:
         self.size = image_size
         self.px_per_m = image_size / world_meters
 
-        self.y_pts = np.linspace(0, image_size, cfg.SPLINE_NUM_CONTROL_POINTS)
+        fr = cfg.SPLINE_Y_FRACTIONS_TOP_TO_BOTTOM
+        if len(fr) != cfg.SPLINE_NUM_CONTROL_POINTS:
+            raise ValueError(
+                "SPLINE_Y_FRACTIONS_TOP_TO_BOTTOM length must match SPLINE_NUM_CONTROL_POINTS"
+            )
+        self.y_pts = np.asarray(fr, dtype=np.float64) * float(image_size)
+        if np.any(np.diff(self.y_pts) <= 0):
+            raise ValueError("SPLINE_Y_FRACTIONS_TOP_TO_BOTTOM must be strictly increasing")
         c = image_size // 2
         x_bottom_to_top = np.array(
             [c + d for d in cfg.SPLINE_X_DELTAS_BOTTOM_TO_TOP], dtype=np.float64
