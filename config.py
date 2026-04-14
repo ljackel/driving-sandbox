@@ -43,6 +43,8 @@ DATASET_PERTURBATIONS_ENABLE = True
 MODEL_USE_TRANSFORMER_HEAD = True
 # Simulation: write first-person MP4 during roll-out.
 SIM_FP_VIDEO_ENABLE = True
+# World: draw a secondary off-ramp in the bottom half of the BEV (visual only; main spline unchanged).
+OFFRAMP_ENABLE = True
 # ``DATASET_ALIGNED_PERTURB`` is computed later (depends on ``DATASET_PERTURBATIONS_ENABLE`` and ``PERTURB_*`` σ).
 
 # --- Bird's-eye world (generate_world.py) ---
@@ -88,6 +90,14 @@ DASH_GAP_METERS = 3.0
 WORLD_GREEN_BGR = (34, 139, 34)
 WORLD_ROAD_BGR = (40, 40, 40)
 ROAD_EDGE_THICKNESS = 1
+# Off-ramp geometry (see ``OFFRAMP_ENABLE`` in switches): branch on main centerline; image-row fraction
+# (0 = top, 1 = bottom). Must be > 0.5 for bottom-half exit; ignored otherwise.
+OFFRAMP_BRANCH_Y_FRAC = 0.78
+# Quadratic Bézier from branch: control point lies ``OFFRAMP_TANGENT_CTRL_PX`` along the **main-road tangent**
+# (traffic toward decreasing ``y``) so the merge is not a sharp kink; end vertex is branch + (Δx, Δy).
+OFFRAMP_TANGENT_CTRL_PX = 95.0
+OFFRAMP_END_DX_PX = 210.0
+OFFRAMP_END_DY_PX = 265.0
 
 # --- Camera / perspective (generate_dataset.py) ---
 CAMERA_IMAGE_SIZE = 128

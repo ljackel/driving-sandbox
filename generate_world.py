@@ -9,7 +9,8 @@ import config as cfg
 class DrivingWorld:
     """
     Top-down raster map: cubic-spline centerline from ``SPLINE_X_DELTAS_BOTTOM_TO_TOP``, two-lane road,
-    dashed center marking. Curvature of this spline drives dataset steering labels after global scaling.
+    dashed center marking, optional bottom-half off-ramp (``OFFRAMP_*``). Curvature of the **main**
+    spline drives dataset steering labels after global scaling.
     """
 
     def __init__(
@@ -59,16 +60,71 @@ class DrivingWorld:
         """
         return float(self.cs(y))
 
-    def create_map(self):
-        """Paint grass, a thick gray polyline for pavement, and white dash segments."""
-        world = np.zeros((self.size, self.size, 3), dtype=np.uint8)
-        world[:] = cfg.WORLD_GREEN_BGR
+    @staticmethod
+    def _densify_polyline(pts: np.ndarray, n_target: int) -> np.ndarray:
+        """Resample open polyline to ``n_target`` points along piecewise-linear arc length."""
+        if len(pts) < 2 or n_target < 2:
+            return pts.astype(np.int32)
+        p = pts.astype(np.float64)
+        seg = np.sqrt(np.sum(np.diff(p, axis=0) ** 2, axis=1))
+        s = np.concatenate([[0.0], np.cumsum(seg)])
+        if s[-1] <= 0:
+            return pts.astype(np.int32)
+        t = np.linspace(0.0, s[-1], n_target)
+        xi = np.interp(t, s, p[:, 0])
+        yi = np.interp(t, s, p[:, 1])
+        return np.column_stack((xi, yi)).astype(np.int32)
 
-        y_new = np.linspace(0, self.size, cfg.ROAD_POLYLINE_SAMPLES)
-        x_new = self.cs(y_new)
-        points = np.vstack((x_new, y_new)).T.astype(np.int32)
+    def _offramp_centerline_points(self) -> np.ndarray | None:
+        """
+        Dense integer polyline ``(N, 2)`` as ``(x, y)`` for the off-ramp, or ``None`` if disabled.
 
-        lane_px = int(cfg.LANE_WIDTH_METERS * self.px_per_m)
+        Quadratic Bézier from the branch: the first control point lies on the main-road tangent
+        (traffic toward decreasing ``y``) so departure is smooth, not a sharp kink.
+        """
+        if not cfg.OFFRAMP_ENABLE:
+            return None
+        y0 = float(np.clip(cfg.OFFRAMP_BRANCH_Y_FRAC, 0.0, 1.0)) * float(self.size)
+        if y0 <= 0.5 * float(self.size):
+            return None
+        p0 = np.array([float(self.cs(y0)), y0], dtype=np.float64)
+        dxdy = float(self.cs(y0, nu=1))
+        # Unit tangent for motion with decreasing y (toward map top), along the centerline.
+        t = np.array([-dxdy, -1.0], dtype=np.float64)
+        t_norm = float(np.linalg.norm(t))
+        if t_norm <= 1e-9:
+            t = np.array([0.0, -1.0], dtype=np.float64)
+        else:
+            t /= t_norm
+        L = float(cfg.OFFRAMP_TANGENT_CTRL_PX)
+        p1 = p0 + L * t
+        p2 = p0 + np.array(
+            [float(cfg.OFFRAMP_END_DX_PX), float(cfg.OFFRAMP_END_DY_PX)], dtype=np.float64
+        )
+        n_bez = 96
+        u = np.linspace(0.0, 1.0, n_bez, dtype=np.float64)
+        omu = 1.0 - u
+        pts = (
+            (omu[:, np.newaxis] ** 2) * p0
+            + (2.0 * omu * u)[:, np.newaxis] * p1
+            + (u[:, np.newaxis] ** 2) * p2
+        )
+        pts[:, 0] = np.clip(pts[:, 0], 0.0, float(self.size - 1))
+        pts[:, 1] = np.clip(pts[:, 1], 0.0, float(self.size - 1))
+        return self._densify_polyline(pts.astype(np.float64), max(120, n_bez * 4))
+
+    @staticmethod
+    def _draw_road_polyline(
+        world: np.ndarray,
+        points: np.ndarray,
+        *,
+        lane_px: int,
+        dash_len: int,
+        dash_gap: int,
+    ) -> None:
+        """Draw gray pavement and white dashes along one open polyline."""
+        if len(points) < 2:
+            return
         cv2.polylines(
             world,
             [points],
@@ -76,9 +132,6 @@ class DrivingWorld:
             cfg.WORLD_ROAD_BGR,
             thickness=lane_px * 2,
         )
-
-        dash_len = int(cfg.DASH_LENGTH_METERS * self.px_per_m)
-        dash_gap = int(cfg.DASH_GAP_METERS * self.px_per_m)
         for i in range(0, len(points) - dash_len, dash_len + dash_gap):
             pt1 = tuple(points[i])
             pt2 = tuple(points[i + dash_len])
@@ -89,6 +142,25 @@ class DrivingWorld:
                 (255, 255, 255),
                 thickness=cfg.ROAD_EDGE_THICKNESS,
             )
+
+    def create_map(self):
+        """Paint grass, a thick gray polyline for pavement, and white dash segments."""
+        world = np.zeros((self.size, self.size, 3), dtype=np.uint8)
+        world[:] = cfg.WORLD_GREEN_BGR
+
+        y_new = np.linspace(0, self.size, cfg.ROAD_POLYLINE_SAMPLES)
+        x_new = self.cs(y_new)
+        points = np.vstack((x_new, y_new)).T.astype(np.int32)
+
+        lane_px = int(cfg.LANE_WIDTH_METERS * self.px_per_m)
+        dash_len = int(cfg.DASH_LENGTH_METERS * self.px_per_m)
+        dash_gap = int(cfg.DASH_GAP_METERS * self.px_per_m)
+
+        self._draw_road_polyline(world, points, lane_px=lane_px, dash_len=dash_len, dash_gap=dash_gap)
+
+        off = self._offramp_centerline_points()
+        if off is not None and len(off) >= 2:
+            self._draw_road_polyline(world, off, lane_px=lane_px, dash_len=dash_len, dash_gap=dash_gap)
         # Orientation: top of image is y=0 (small y); blue stripe marks that edge for debugging.
         cv2.line(
             world,
