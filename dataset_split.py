@@ -110,3 +110,73 @@ def dataset_train_test_y(
     rng = np.random.default_rng(seed)
     perm = rng.permutation(n_pool)
     return y_pool[perm[: int(num_train)]], y_pool[perm[int(num_train) :]]
+
+
+def centerline_arc_length_between_rows(
+    cs,
+    y_a: float,
+    y_b: float,
+    *,
+    n_fine: int | None = None,
+) -> float:
+    """
+    Euclidean arc length (pixels) along ``x = cs(y)`` between two rows; ``y_a``, ``y_b`` order-free.
+    """
+    lo = float(min(y_a, y_b))
+    hi = float(max(y_a, y_b))
+    if hi <= lo + 1e-12:
+        return 0.0
+    nf = int(n_fine) if n_fine is not None else max(2000, 500)
+    y_fine = np.linspace(lo, hi, nf, dtype=np.float64)
+    x_fine = cs(y_fine)
+    return float(np.sum(np.sqrt(np.diff(x_fine) ** 2 + np.diff(y_fine) ** 2)))
+
+
+def offramp_clean_counts_matching_main_spacing(
+    L_ramp_px: float,
+    num_train: int,
+    num_test: int,
+    size: int,
+    margin: float,
+    *,
+    mix_train_test_geography: bool,
+    cs,
+    cap_train: int,
+    cap_test: int,
+    match_spacing: bool,
+) -> tuple[int, int]:
+    """
+    Off-ramp clean frame counts for train / test.
+
+    When ``match_spacing`` is false, returns ``cap_train``, ``cap_test``. When true, each count is
+    ``min(cap, max(1, round(L_ramp / delta)))`` with ``delta`` the mean centerline spacing of the
+    corresponding main-road clean grid (or full-road pool spacing when geography is mixed).
+    """
+    ct = max(0, int(cap_train))
+    ce = max(0, int(cap_test))
+    if L_ramp_px <= 0.0 or not np.isfinite(L_ramp_px):
+        return 0, 0
+    if not match_spacing:
+        return ct, ce
+
+    if not mix_train_test_geography:
+        half = size // 2
+        y_tr_hi = float(size - margin)
+        y_tr_lo = float(half) + 1.0
+        y_te_hi = float(half)
+        y_te_lo = float(margin)
+        L_tr = centerline_arc_length_between_rows(cs, y_tr_lo, y_tr_hi)
+        L_te = centerline_arc_length_between_rows(cs, y_te_lo, y_te_hi)
+        d_tr = L_tr / max(int(num_train) - 1, 1)
+        d_te = L_te / max(int(num_test) - 1, 1)
+        n_tr = max(1, int(round(L_ramp_px / d_tr)))
+        n_te = max(1, int(round(L_ramp_px / d_te)))
+        return (min(ct, n_tr) if ct > 0 else 0, min(ce, n_te) if ce > 0 else 0)
+
+    y_pool_hi = float(size - margin)
+    y_pool_lo = float(margin)
+    L_full = centerline_arc_length_between_rows(cs, y_pool_lo, y_pool_hi)
+    n_pool = int(num_train) + int(num_test)
+    d_pool = L_full / max(n_pool - 1, 1)
+    n_r = max(1, int(round(L_ramp_px / d_pool)))
+    return (min(ct, n_r) if ct > 0 else 0, min(ce, n_r) if ce > 0 else 0)

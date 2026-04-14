@@ -21,6 +21,17 @@ def _bezier_quadratic_xy_d1_d2(
     return B, d1, d2
 
 
+def _bezier_quadratic_xy_batch(
+    p0: np.ndarray,
+    p1: np.ndarray,
+    p2: np.ndarray,
+    u: np.ndarray,
+) -> np.ndarray:
+    """``B(u)`` for each entry in 1-D ``u``; returns ``(len(u), 2)``."""
+    u = np.asarray(u, dtype=np.float64).reshape(-1, 1)
+    omu = 1.0 - u
+    return (omu * omu) * p0 + (2.0 * omu * u) * p1 + (u * u) * p2
+
 
 class DrivingWorld:
     """
@@ -163,6 +174,63 @@ class DrivingWorld:
             kappa = (xp * ypp - yp * xpp) / denom
         return B.astype(np.float64), (float(fx), float(fy)), float(kappa)
 
+    def offramp_u_samples_uniform_arc_length(
+        self,
+        n: int,
+        *,
+        u_lo: float = 0.05,
+        u_hi: float = 0.95,
+        n_fine: int | None = None,
+    ) -> np.ndarray:
+        """
+        ``n`` values of Bézier parameter ``u``, approximately **uniform in Euclidean arc length** between
+        ``u_lo`` and ``u_hi`` (same inset band as legacy ``linspace`` sampling).
+
+        Matches the spirit of ``dataset_split._y_samples_uniform_arc_length`` for the main spline.
+        """
+        ctrl = self._offramp_bezier_controls()
+        if ctrl is None or n <= 0:
+            return np.zeros((0,), dtype=np.float64)
+        p0, p1, p2 = ctrl
+        u_lo = float(np.clip(u_lo, 0.0, 1.0))
+        u_hi = float(np.clip(u_hi, 0.0, 1.0))
+        if u_hi <= u_lo + 1e-12:
+            return np.full((n,), u_lo, dtype=np.float64)
+        nf = int(n_fine) if n_fine is not None else max(500, int(n) * 100)
+        u_fine = np.linspace(u_lo, u_hi, nf, dtype=np.float64)
+        B = _bezier_quadratic_xy_batch(p0, p1, p2, u_fine)
+        seg = np.sqrt(np.sum(np.diff(B, axis=0) ** 2, axis=1))
+        s = np.concatenate([[0.0], np.cumsum(seg)])
+        s_tot = float(s[-1])
+        if (not np.isfinite(s_tot)) or s_tot <= 0.0:
+            return np.linspace(u_lo, u_hi, n, dtype=np.float64)
+        if n == 1:
+            return np.array(
+                [float(np.interp(0.5 * s_tot, s, u_fine))], dtype=np.float64
+            )
+        targets = np.linspace(0.0, s_tot, n, dtype=np.float64)
+        return np.interp(targets, s, u_fine).astype(np.float64)
+
+    def offramp_arc_length_px(
+        self,
+        u_lo: float = 0.05,
+        u_hi: float = 0.95,
+        *,
+        n_fine: int = 2000,
+    ) -> float:
+        """Pixel arc length along the off-ramp Bézier between ``u_lo`` and ``u_hi`` (dataset inset band)."""
+        ctrl = self._offramp_bezier_controls()
+        if ctrl is None:
+            return 0.0
+        u_lo = float(np.clip(u_lo, 0.0, 1.0))
+        u_hi = float(np.clip(u_hi, 0.0, 1.0))
+        if u_hi <= u_lo + 1e-12:
+            return 0.0
+        p0, p1, p2 = ctrl
+        u_fine = np.linspace(u_lo, u_hi, int(n_fine), dtype=np.float64)
+        B = _bezier_quadratic_xy_batch(p0, p1, p2, u_fine)
+        return float(np.sum(np.sqrt(np.sum(np.diff(B, axis=0) ** 2, axis=1))))
+
     def offramp_max_abs_curvature(self, n: int = 128) -> float:
         """Max ``|κ|`` along the Bézier (for ``SIM_YAW_RATE_GAIN`` vs dataset κ scaling)."""
         if self._offramp_bezier_controls() is None:
@@ -175,6 +243,25 @@ class DrivingWorld:
                 continue
             m = max(m, abs(float(ev[2])))
         return float(m)
+
+    def offramp_step_arc_px(self, u: float, ds: float) -> tuple[float, float, float] | None:
+        """
+        Advance the Bézier parameter by arc length ``ds`` (pixels in BEV).
+
+        Returns ``(u_new, x, y)`` on the ramp centerline, or ``None`` if the off-ramp is disabled.
+        """
+        ctrl = self._offramp_bezier_controls()
+        if ctrl is None:
+            return None
+        p0, p1, p2 = ctrl
+        u = float(np.clip(u, 0.0, 1.0))
+        _, d1, _ = _bezier_quadratic_xy_d1_d2(p0, p1, p2, u)
+        vnorm = float(np.hypot(float(d1[0]), float(d1[1])))
+        if vnorm < cfg.CURVATURE_DENOM_EPS:
+            return None
+        u_new = float(np.clip(u + float(ds) / vnorm, 0.0, 1.0))
+        B, _, _ = _bezier_quadratic_xy_d1_d2(p0, p1, p2, u_new)
+        return u_new, float(B[0]), float(B[1])
 
     @staticmethod
     def _draw_road_polyline(

@@ -29,14 +29,18 @@ def driving_net_parameter_rows(model: DrivingNet) -> tuple[list[tuple[str, int]]
                 f"transformer_encoder ({cfg.MODEL_TRANSFORMER_NUM_LAYERS} layers)",
                 sum(p.numel() for p in model.encoder.parameters()),
             ),
-            ("head (Linear)", sum(p.numel() for p in model.head.parameters())),
+            (
+                "head (Linear; in = pooled ‖ take_offramp)",
+                sum(p.numel() for p in model.head.parameters()),
+            ),
         ]
     else:
         rows = [
             ("backbone (2× Conv2d + ReLU)", sum(p.numel() for p in model.backbone.parameters())),
+            ("Flatten (no params)", 0),
             (
-                "MLP (Flatten + Linear → out)",
-                sum(p.numel() for p in model.mlp_head.parameters()),
+                "Linear (flattened ‖ take_offramp → out)",
+                sum(p.numel() for p in model.mlp_lin.parameters()),
             ),
         ]
     total = sum(n for _, n in rows)
@@ -53,15 +57,17 @@ def _mermaid_block(model: DrivingNet) -> str:
         fh = cfg.MODEL_FLATTEN_DIM
         f1 = fh + 1
         return f"""flowchart TB
-  IN["Input: (N, 3, {h}, {h})"]
+  IMG["RGB image (N, 3, {h}, {h})"]
+  INTENT["take_offramp (N, 1)<br/>0 = main road, 1 = off-ramp<br/>CSV column in train; SIM_TAKE_OFFRAMP in sim"]
   subgraph CNN["CNN backbone"]
     C1["Conv2d 3→{c1}, k={k}, s={s} + ReLU"]
     C2["Conv2d {c1}→{c2}, k={k}, s={s} + ReLU"]
   end
-  FL["Flatten → {fh}"]
-  CAT["Concat take_offramp → {f1}"]
-  OUT["Linear {f1}→{out} (steering = [:,0])"]
-  IN --> C1 --> C2 --> FL --> CAT --> OUT
+  FL["Flatten → (N, {fh})"]
+  CAT["torch.cat (feats, take_offramp) → (N, {f1})"]
+  OUT["Linear (N, {f1})→(N, {out})<br/>steering = [:, 0]"]
+  IMG --> C1 --> C2 --> FL --> CAT --> OUT
+  INTENT --> CAT
 """
     p = model.token_grid
     t = model.num_tokens
@@ -70,7 +76,8 @@ def _mermaid_block(model: DrivingNet) -> str:
     nh = cfg.MODEL_TRANSFORMER_NHEAD
     ff = cfg.MODEL_TRANSFORMER_FF_DIM
     return f"""flowchart TB
-  IN["Input: (N, 3, {h}, {h})"]
+  IMG["RGB image (N, 3, {h}, {h})"]
+  INTENT["take_offramp (N, 1)<br/>0 = main road, 1 = off-ramp<br/>CSV column in train; SIM_TAKE_OFFRAMP in sim"]
   subgraph CNN["CNN backbone"]
     C1["Conv2d 3→{c1}, k={k}, s={s} + ReLU"]
     C2["Conv2d {c1}→{c2}, k={k}, s={s} + ReLU"]
@@ -82,9 +89,10 @@ def _mermaid_block(model: DrivingNet) -> str:
     ENC["Encoder ×{L}: d={d}, heads={nh}, FFN={ff}"]
   end
   POOL2["Mean over tokens → (N, {d})"]
-  CAT["Concat take_offramp → (N, {d}+1)"]
-  HEAD["Linear {d}+1→{out} (steering = [:,0])"]
-  IN --> C1 --> C2 --> POOL --> TOK --> PROJ --> ENC --> POOL2 --> CAT --> HEAD
+  CAT["torch.cat (pooled, take_offramp) → (N, {d}+1)"]
+  HEAD["Linear (N, {d}+1)→(N, {out})<br/>steering = [:, 0]"]
+  IMG --> C1 --> C2 --> POOL --> TOK --> PROJ --> ENC --> POOL2 --> CAT --> HEAD
+  INTENT --> CAT
 """
 
 
@@ -165,6 +173,14 @@ def write_architecture_artifacts(run_dir: str, model: nn.Module) -> None:
         lines.append(f"| {name} | {_fmt_int(n)} |")
     lines.extend(
         [
+            "",
+            "### Intent input `take_offramp`",
+            "",
+            "Not part of the image tensor. A per-batch scalar **(N, 1)** in **{0, 1}** is **concatenated** to the pooled vector before the final `Linear` (see `DrivingNet.forward`).",
+            "",
+            "- **Training:** `take_offramp` column in `labels.csv` (from `generate_dataset`: main rows = 0, `offramp_*.jpg` = 1).",
+            "- **Simulation:** `SIM_TAKE_OFFRAMP` in `config.py` → tensor passed as the second argument to `model(...)`.",
+            "- **Omit / `None`:** treated as all zeros (main road).",
             "",
             "## Diagram (Mermaid)",
             "",

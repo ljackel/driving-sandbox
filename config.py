@@ -6,13 +6,14 @@ Summary:
 - **World:** S-curve from ``SPLINE_X_DELTAS_BOTTOM_TO_TOP`` (``generate_world``).
 - **Dataset:** By default train = bottom BEV half, test = top half. If ``DATASET_MIX_TRAIN_TEST_GEOGRAPHY`` is
   true, both splits sample the full road via shuffle-split (``DATASET_SEED``). ``DATASET_SAMPLE_UNIFORM_ALONG_ROAD``
-  chooses equal spacing along the road vs equal spacing in image ``y``. Perturbed duplicate frames:
+  chooses equal spacing along the main road (and along the off-ramp Bézier) vs uniform ``y`` / ``u``. Perturbed duplicate frames:
   ``DATASET_PERTURBATIONS_ENABLE`` plus ``PERTURB_*``. ``NUM_TRAIN_FRAMES`` / ``NUM_TEST_FRAMES`` are clean-grid
   counts; ``TOTAL_TRAIN_FRAMES`` / ``TOTAL_TEST_FRAMES`` are full split sizes after generation.
 - **Model input:** ``PERSPECTIVE_INPUT_BOTTOM_HALF_ONLY`` uses only the bottom half of each perspective
   crop (near-ego pixels), resized to ``CAMERA_IMAGE_SIZE``; otherwise the full crop is used.
 - **Labels:** Steering is ``kappa / max|kappa|`` over all CSV rows (``generate_dataset``), including the
-  optional off-ramp Bézier when ``OFFRAMP_ENABLE`` and ``DATASET_OFFRAMP_LABELS_ENABLE``. Column ``take_offramp`` (0 = main road, 1 = ramp) is an extra model input. Lateral/yaw recentering applies
+  optional off-ramp Bézier when ``OFFRAMP_ENABLE`` and ``DATASET_OFFRAMP_LABELS_ENABLE``. Off-ramp row counts
+  can match main-road spacing (``DATASET_OFFRAMP_MATCH_MAIN_SPACING``). Column ``take_offramp`` (0 = main road, 1 = ramp) is an extra model input. Lateral/yaw recentering applies
   to perturbed rows when ``DATASET_PERTURBATIONS_ENABLE`` is true and ``PERTURB_*`` σ > 0.
 - **Training:** MSE on ``DrivingNet`` channel 0 only with ``take_offramp`` concatenated to the head input; ``EPOCHS`` is in switches; see ``MODEL_USE_TRANSFORMER_HEAD``, ``LEARNING_RATE``.
 - **Simulation:** ``SIM_YAW_RATE_GAIN`` from ``_compute_sim_yaw_rate_gain`` aligns ``psi += steering * gain * dt``
@@ -36,7 +37,9 @@ LABELS_TMP = "labels.partial.tmp"
 PERSPECTIVE_INPUT_BOTTOM_HALF_ONLY = False
 # Dataset: false = train bottom BEV half, test top half; true = shuffle-split full road for both.
 DATASET_MIX_TRAIN_TEST_GEOGRAPHY = False
-# Dataset: if true, clean sample positions are uniform in **arc length** along the centerline; if false, uniform in ``y``.
+# Dataset: if true, clean main-road samples are uniform in **arc length** along the centerline; off-ramp samples
+# are uniform in arc length along the Bézier (between the usual ``u`` inset). If false, main uses uniform ``y``;
+# ramp uses uniform ``u`` (not arc length).
 DATASET_SAMPLE_UNIFORM_ALONG_ROAD = True
 # Dataset: add aligned perturbed train/test frames when a perturb σ > 0 (see PERTURB_* below).
 DATASET_PERTURBATIONS_ENABLE = True
@@ -48,14 +51,13 @@ EPOCHS = 20
 SIM_FP_VIDEO_ENABLE = True
 # World: draw a secondary off-ramp in the bottom half of the BEV; optional dataset labels + κ for it.
 OFFRAMP_ENABLE = True
-# Simulation: DrivingNet ``take_offramp`` input. False = main-road policy (does **not** stop drift onto the ramp).
+# Simulation: DrivingNet ``take_offramp`` input (1 = ramp intent; 0 = stay on main).
+# Off-ramp **geometry** in sim also needs ``SIM_PROJECT_REF_ONTO_MAIN_ROAD`` (see below).
 SIM_TAKE_OFFRAMP = False
-# Simulation: after each step, set reference ``x = cs(y)`` with ``y`` from integration (clamped).
-# Stays on the main spline without the “stuck ego” artifact of Euclidean closest-point snapping.
+# Simulation: advance the centerline reference by arc length along the main spline (and off-ramp Bézier when
+# ``SIM_TAKE_OFFRAMP``). Avoids ``cos/sin(psi)`` + ``x=cs(y)`` chord errors. False = free BC integration (no ramp path).
 SIM_PROJECT_REF_ONTO_MAIN_ROAD = True
-# If the perspective warp fails (often near the off-ramp when ``psi`` points wrong), retry with main-road tangent.
-SIM_RETRY_VIEW_WITH_ROAD_HEADING = True
-# After each step, blend this fraction of the main-road heading into ``psi`` (0 = pure BC heading). Stabilizes warp.
+# After each step, blend this fraction of the main-road heading into integrated ``psi`` (for kinematics only).
 SIM_BLEND_PSI_TO_MAIN_ROAD = 0.22
 # ``DATASET_ALIGNED_PERTURB`` is computed later (depends on ``DATASET_PERTURBATIONS_ENABLE`` and ``PERTURB_*`` σ).
 
@@ -131,11 +133,14 @@ PERSPECTIVE_SRC_MARGIN_PX = 12.0
 # BEV ``y`` increases downward; geography split vs mix is ``DATASET_MIX_TRAIN_TEST_GEOGRAPHY`` (switches above).
 DATASET_MAP_MARGIN = 80
 # Clean grid size per split; with aligned perturbations on, total files = 2 × this (half clean, half perturbed).
-NUM_TRAIN_FRAMES = 200
-NUM_TEST_FRAMES = 200
+NUM_TRAIN_FRAMES = 100
+NUM_TEST_FRAMES = 100
 # Extra train/test images on the off-ramp (``train/offramp_*.jpg``, ``test/offramp_*.jpg``) with
 # ``take_offramp=1``; ignored unless ``OFFRAMP_ENABLE`` and ``DATASET_OFFRAMP_LABELS_ENABLE``.
 DATASET_OFFRAMP_LABELS_ENABLE = True
+# If true, off-ramp clean counts are ``min(cap below, …)`` so average BEV spacing on the ramp matches
+# the main-road train/test grid (ramp is shorter than the main segment, so counts drop vs caps).
+DATASET_OFFRAMP_MATCH_MAIN_SPACING = True
 DATASET_OFFRAMP_TRAIN_FRAMES = NUM_TRAIN_FRAMES
 DATASET_OFFRAMP_TEST_FRAMES = NUM_TEST_FRAMES
 # Camera lateral (m) = LANE_WIDTH_METERS × fraction: from spline (lane divider) along driver's-right
@@ -171,7 +176,8 @@ _DATASET_OFFRAMP_TEST_N = (
     else 0
 )
 # Rows in ``labels.csv`` / image files per split after generation. ``NUM_TRAIN_FRAMES`` and
-# ``NUM_TEST_FRAMES`` count **clean** grid positions only.
+# ``NUM_TEST_FRAMES`` count **clean** grid positions only. Off-ramp terms use configured caps; with
+# ``DATASET_OFFRAMP_MATCH_MAIN_SPACING`` true, ``generate_dataset`` may write fewer off-ramp rows.
 TOTAL_TRAIN_FRAMES = int(
     NUM_TRAIN_FRAMES
     + (
@@ -305,7 +311,7 @@ SIM_DT = 0.05
 # Nudge upward slightly if behavioral cloning still under-steers in open loop.
 SIM_YAW_RATE_GAIN = _compute_sim_yaw_rate_gain()
 # Maximum simulation steps per ``simulate.run_simulation`` (hard cap; early exit may stop sooner).
-SIM_MAX_STEPS = 1000
+SIM_MAX_STEPS = 2000
 # End roll-out when the centerline reference reaches the top drivable band (``y <= DATASET_MAP_MARGIN``).
 SIM_STOP_WHEN_REACHES_MAP_TOP = True
 # Meters from centerline toward driver's right; must match ``generate_dataset`` camera offset
