@@ -28,6 +28,7 @@ import numpy as np
 import torch
 
 import config as cfg
+from data_loader import count_train_test_examples
 from perspective_camera import perspective_camera_view
 from reproducibility import set_global_seed
 
@@ -338,6 +339,8 @@ def run_simulation() -> tuple[
 
 def main() -> None:
     """Run simulation, save BEV overlay, CSV, first-person MP4 (if enabled), print stats, show figure."""
+    n_train, n_test = count_train_test_examples()
+    print(f"Dataset: {n_train} train examples, {n_test} test examples")
     world_bgr, path, ckpt, px_per_m, fp_video = run_simulation()
     path_arr = np.array(path, dtype=np.float64)
 

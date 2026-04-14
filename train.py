@@ -19,7 +19,11 @@ from torch.utils.data import DataLoader
 from torchvision import transforms
 
 import config as cfg
-from data_loader import DrivingDataset, prepare_perspective_pil_for_model
+from data_loader import (
+    DrivingDataset,
+    prepare_perspective_pil_for_model,
+    resolve_labels_csv_path,
+)
 from generate_world import DrivingWorld
 from reproducibility import set_global_seed
 
@@ -41,20 +45,6 @@ def _fmt_loss_colored(value: float, *, color: str) -> str:
     return f"{color}{value:.4f}{_RST}"
 
 
-def _labels_csv_path() -> str:
-    """Prefer data/labels.csv; if labels_new.csv is newer (e.g. CSV was locked), use it."""
-    a = os.path.join(cfg.DATA_DIR, cfg.LABELS_CSV)
-    b = os.path.join(cfg.DATA_DIR, cfg.LABELS_CSV_ALT)
-    have_a, have_b = os.path.isfile(a), os.path.isfile(b)
-    if have_a and have_b and os.path.getmtime(b) > os.path.getmtime(a):
-        return b
-    if have_a:
-        return a
-    if have_b:
-        return b
-    return a
-
-
 # 1. Configuration
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 batch_size = cfg.BATCH_SIZE
@@ -73,7 +63,7 @@ transform = transforms.Compose(
 
 # 3. Load Dataset
 dataset = DrivingDataset(
-    csv_file=_labels_csv_path(),
+    csv_file=resolve_labels_csv_path(),
     root_dir=cfg.DATA_DIR,
     transform=transform,
     path_prefix="train/",
@@ -87,7 +77,7 @@ train_loader = DataLoader(
 )
 
 test_dataset = DrivingDataset(
-    csv_file=_labels_csv_path(),
+    csv_file=resolve_labels_csv_path(),
     root_dir=cfg.DATA_DIR,
     transform=transform,
     path_prefix="test/",
@@ -110,6 +100,10 @@ run_dir = os.path.join(_root, cfg.RUNS_DIR, _run_stamp)
 os.makedirs(run_dir, exist_ok=True)
 
 # 5. The Training Loop
+print(
+    f"Dataset: {len(dataset)} train examples, {len(test_dataset)} test examples "
+    f"(from {resolve_labels_csv_path()!r})"
+)
 print(f"Starting training on {device}...")
 print(f"Run artifacts directory: {run_dir!r}")
 if test_loader is not None:

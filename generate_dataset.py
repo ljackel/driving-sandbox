@@ -316,9 +316,21 @@ def annotate_perturb_debug_bgr(
     _put_outlined_lines_bgr(img, lines, cfg.ANNOT_STEERING_POS)
 
 
+def _clear_jpgs_in_dir(dir_path: str) -> None:
+    """Remove ``*.jpg`` in ``dir_path`` if the directory exists (stale frames from smaller runs)."""
+    if not os.path.isdir(dir_path):
+        return
+    for name in os.listdir(dir_path):
+        if name.lower().endswith(".jpg"):
+            os.remove(os.path.join(dir_path, name))
+
+
 def generate_data(num_train=cfg.NUM_TRAIN_FRAMES, num_test=cfg.NUM_TEST_FRAMES):
     """
     Render train/test perspective frames, steering labels, and ``data/labels.csv``.
+
+    Existing ``*.jpg`` under ``data/train``, ``data/test``, ``data/test_labeled``, and
+    ``data/{TRAIN_PERTURB_DEBUG_SUBDIR}`` are deleted first so folder counts match the new run.
 
     **Spatial split:** if ``DATASET_MIX_TRAIN_TEST_GEOGRAPHY`` is false, train ``y`` is only the bottom
     BEV half and test ``y`` only the top half (no overlap). If true, both splits sample the full road
@@ -342,6 +354,12 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES, num_test=cfg.NUM_TEST_FRAMES):
 
     os.makedirs(os.path.join(cfg.DATA_DIR, "train"), exist_ok=True)
     os.makedirs(os.path.join(cfg.DATA_DIR, "test"), exist_ok=True)
+    _clear_jpgs_in_dir(os.path.join(cfg.DATA_DIR, "train"))
+    _clear_jpgs_in_dir(os.path.join(cfg.DATA_DIR, "test"))
+    _clear_jpgs_in_dir(os.path.join(cfg.DATA_DIR, "test_labeled"))
+    _clear_jpgs_in_dir(
+        os.path.join(cfg.DATA_DIR, cfg.TRAIN_PERTURB_DEBUG_SUBDIR)
+    )
 
     right_lane_offset_px = (
         cfg.LANE_WIDTH_METERS * cfg.DATASET_RIGHT_LANE_LATERAL_FRAC * dw.px_per_m
@@ -380,9 +398,7 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES, num_test=cfg.NUM_TEST_FRAMES):
         kappa = signed_path_curvature(dw.cs, yf)
         records.append((rel_path, kappa, 0.0, 0.0))
 
-    perturb_train = cfg.DATASET_PERTURBATIONS_ENABLE and (
-        cfg.PERTURB_LATERAL_STD_M > 0.0 or cfg.PERTURB_YAW_STD_DEG > 0.0
-    )
+    perturb_train = cfg.DATASET_ALIGNED_PERTURB
     if perturb_train:
         debug_dir = os.path.join(cfg.DATA_DIR, cfg.TRAIN_PERTURB_DEBUG_SUBDIR)
         os.makedirs(debug_dir, exist_ok=True)
@@ -468,9 +484,7 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES, num_test=cfg.NUM_TEST_FRAMES):
         kappa = signed_path_curvature(dw.cs, yf)
         records.append((rel_path, kappa, 0.0, 0.0))
 
-    perturb_test = cfg.DATASET_PERTURBATIONS_ENABLE and (
-        cfg.PERTURB_LATERAL_STD_M > 0.0 or cfg.PERTURB_YAW_STD_DEG > 0.0
-    )
+    perturb_test = cfg.DATASET_ALIGNED_PERTURB
     if perturb_test:
         rng_test = np.random.default_rng(
             cfg.DATASET_SEED + cfg.TEST_PERTURB_SEED_OFFSET

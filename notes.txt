@@ -13,3 +13,4 @@ now stays in lane.
 made road more curvy. loss are smaller - this is a surprise. still drives well
 
 now double curviness again. still good.
+

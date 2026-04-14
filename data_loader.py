@@ -8,6 +8,32 @@ from torch.utils.data import Dataset, DataLoader
 import config as cfg
 
 
+def resolve_labels_csv_path() -> str:
+    """
+    Path to the active labels file: ``labels.csv``, or ``labels_new.csv`` if it exists and is newer
+    (e.g. Windows lock on the primary file during generation).
+    """
+    a = os.path.join(cfg.DATA_DIR, cfg.LABELS_CSV)
+    b = os.path.join(cfg.DATA_DIR, cfg.LABELS_CSV_ALT)
+    have_a, have_b = os.path.isfile(a), os.path.isfile(b)
+    if have_a and have_b and os.path.getmtime(b) > os.path.getmtime(a):
+        return b
+    if have_a:
+        return a
+    if have_b:
+        return b
+    return a
+
+
+def count_train_test_examples() -> tuple[int, int]:
+    """Counts of ``train/`` and ``test/`` rows in the active labels CSV (no image loading)."""
+    path = resolve_labels_csv_path()
+    df = pd.read_csv(path)
+    n_train = int(df["image_path"].str.startswith("train/").sum())
+    n_test = int(df["image_path"].str.startswith("test/").sum())
+    return n_train, n_test
+
+
 def prepare_perspective_pil_for_model(im: Image.Image) -> Image.Image:
     """
     Optionally crop to the bottom half of the perspective image (rows nearest the vehicle).

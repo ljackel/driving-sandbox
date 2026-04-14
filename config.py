@@ -6,7 +6,8 @@ Summary:
 - **World:** S-curve from ``SPLINE_X_DELTAS_BOTTOM_TO_TOP`` (``generate_world``).
 - **Dataset:** By default train = bottom BEV half, test = top half. If ``DATASET_MIX_TRAIN_TEST_GEOGRAPHY`` is
   true, both splits sample the full road via shuffle-split (``DATASET_SEED``). Perturbed duplicate frames:
-  ``DATASET_PERTURBATIONS_ENABLE`` plus ``PERTURB_*``. See ``NUM_TRAIN_FRAMES``, etc.
+  ``DATASET_PERTURBATIONS_ENABLE`` plus ``PERTURB_*``. ``NUM_TRAIN_FRAMES`` / ``NUM_TEST_FRAMES`` are clean-grid
+  counts; ``TOTAL_TRAIN_FRAMES`` / ``TOTAL_TEST_FRAMES`` are full split sizes after generation.
 - **Model input:** ``PERSPECTIVE_INPUT_BOTTOM_HALF_ONLY`` uses only the bottom half of each perspective
   crop (near-ego pixels), resized to ``CAMERA_IMAGE_SIZE``; otherwise the full crop is used.
 - **Labels:** Steering is ``kappa / max|kappa|`` over all CSV rows (``generate_dataset``). Lateral/yaw
@@ -72,14 +73,15 @@ PERSPECTIVE_INPUT_BOTTOM_HALF_ONLY = False
 # top and bottom road geometry. Perturbed duplicate frames: ``DATASET_PERTURBATIONS_ENABLE`` plus ``PERTURB_*``.
 DATASET_MIX_TRAIN_TEST_GEOGRAPHY = True
 DATASET_MAP_MARGIN = 80
-NUM_TRAIN_FRAMES = 1000
-NUM_TEST_FRAMES = 100
+# Clean grid size per split; with aligned perturbations on, total files = 2 × this (half clean, half perturbed).
+NUM_TRAIN_FRAMES = 50
+NUM_TEST_FRAMES = 50
 # Camera lateral (m) = LANE_WIDTH_METERS × fraction: from spline (lane divider) along driver's-right
 # toward the outer edge. 0.5 = geometric center of the right lane; lower if the view hugs the outer edge.
 DATASET_RIGHT_LANE_LATERAL_FRAC = 0.45
 # If false: only clean train/test frames (``PERTURB_*`` ignored for generation). If true: extra aligned
 # perturbed train/test frames when at least one of ``PERTURB_LATERAL_STD_M`` / ``PERTURB_YAW_STD_DEG`` > 0.
-DATASET_PERTURBATIONS_ENABLE = False
+DATASET_PERTURBATIONS_ENABLE = True
 # Gaussian lateral (m) and yaw (deg) for perturbed views; BEV uses ``WORLD_IMAGE_SIZE / WORLD_METERS`` px/m.
 PERTURB_LATERAL_STD_M = 2.2
 PERTURB_YAW_STD_DEG = 0.0
@@ -87,8 +89,30 @@ PERTURB_YAW_STD_DEG = 0.0
 TRAIN_PERTURB_RECENTER_GAIN_LAT = 0.35
 TRAIN_PERTURB_RECENTER_GAIN_YAW = 2.0
 TRAIN_PERTURB_VIEW_RETRIES = 30
-# Extra perturbed train frames when perturbations are enabled; ``y`` from train grid with replacement.
-TRAIN_PERTURB_EXTRA_FRAMES = 4000
+# Extra perturbed train frames beyond the 1:1 grid (indices ``2*NUM_TRAIN_FRAMES ..``); ``y`` sampled
+# from the train grid with replacement. This does *not* turn off aligned clean/perturbed pairs
+# (``NUM_TRAIN_FRAMES`` clean then ``NUM_TRAIN_FRAMES`` perturbed); for clean-only train data set
+# ``DATASET_PERTURBATIONS_ENABLE = False`` or both ``PERTURB_*`` σ to 0.
+TRAIN_PERTURB_EXTRA_FRAMES = 0
+# When true, ``generate_dataset`` adds aligned perturbed mates (and train extras); same gate as
+# ``perturb_train`` / ``perturb_test`` in ``generate_dataset.py``.
+DATASET_ALIGNED_PERTURB = bool(
+    DATASET_PERTURBATIONS_ENABLE
+    and (PERTURB_LATERAL_STD_M > 0.0 or PERTURB_YAW_STD_DEG > 0.0)
+)
+# Rows in ``labels.csv`` / image files per split after generation. ``NUM_TRAIN_FRAMES`` and
+# ``NUM_TEST_FRAMES`` count **clean** grid positions only.
+TOTAL_TRAIN_FRAMES = int(
+    NUM_TRAIN_FRAMES
+    + (
+        NUM_TRAIN_FRAMES + int(TRAIN_PERTURB_EXTRA_FRAMES)
+        if DATASET_ALIGNED_PERTURB
+        else 0
+    )
+)
+TOTAL_TEST_FRAMES = int(
+    NUM_TEST_FRAMES + (NUM_TEST_FRAMES if DATASET_ALIGNED_PERTURB else 0)
+)
 # Companion images for perturbed train views (lat/yaw/κ); not listed in labels.csv.
 TRAIN_PERTURB_DEBUG_SUBDIR = "train_perturb_debug"
 # RNG stream for test perturbation draws (independent of train; same σ).
