@@ -22,6 +22,9 @@ half of the warp, then resize to ``CAMERA_IMAGE_SIZE``).
 **Intent:** ``SIM_TAKE_OFFRAMP`` selects which steering targets the net emulates (main vs ramp). It does **not**
 pin the vehicle to a lane: the policy still steers from pixels, so use ``SIM_PROJECT_REF_ONTO_MAIN_ROAD`` to
 reproject the integrated reference onto the main centerline each step when an off-ramp is drawn.
+
+**Near the off-ramp fork:** drifting ``psi`` can make the BEV frustum leave the map (warp ``None`` → sim stops).
+``SIM_RETRY_VIEW_WITH_ROAD_HEADING`` and ``SIM_BLEND_PSI_TO_MAIN_ROAD`` keep the camera valid on the main line.
 """
 from __future__ import annotations
 
@@ -228,6 +231,19 @@ def initial_heading_road_aligned(cs, y: float) -> float:
     return float(np.arctan2(fy, fx))
 
 
+def _blend_psi_toward(psi: float, psi_tgt: float, w: float) -> float:
+    """Circular blend of headings; ``w`` in ``[0, 1]`` is weight on ``psi_tgt``."""
+    w = float(np.clip(w, 0.0, 1.0))
+    if w <= 0.0:
+        return psi
+    return float(
+        np.arctan2(
+            (1.0 - w) * np.sin(psi) + w * np.sin(psi_tgt),
+            (1.0 - w) * np.cos(psi) + w * np.cos(psi_tgt),
+        )
+    )
+
+
 def _ego_lateral_offset_px(dw: DrivingWorld) -> float:
     """Camera/ego offset from centerline (px), same convention as training."""
     return float(cfg.SIM_EGO_LATERAL_OFFSET_M) * float(dw.px_per_m)
@@ -274,28 +290,23 @@ def _right_lane_overlay_xy(
     return x + rx * lateral_offset_px, y + ry * lateral_offset_px
 
 
-def _snap_ref_to_main_centerline_graph(
+def _project_ref_onto_main_centerline_xy(
     dw: DrivingWorld,
-    x: float,
+    _x_integrated: float,
     y: float,
     *,
     margin: float,
     h: int,
-    n_samples: int = 512,
 ) -> tuple[float, float]:
     """
-    Closest point on the main-road graph ``(x, y) = (cs(y'), y')`` to the integrated reference ``(x, y)``.
+    Keep integrated image-row ``y`` (clamped), set ``x = cs(y)`` on the main spline.
 
-    Coarse grid search in ``y'`` is sufficient to keep open-loop BC from drifting onto a separate off-ramp polyline.
+    Euclidean “closest point” on ``(cs(y'), y')`` can return the **same** ``y'`` when the step is
+    nearly perpendicular to the graph, which freezes the BEV path; this projection preserves forward
+    motion from ``y += Δy`` while blocking lateral drift onto the off-ramp.
     """
-    y_lo = float(margin)
-    y_hi = float(max(y_lo + 1.0, h - 1.0 - margin))
-    y_grid = np.linspace(y_lo, y_hi, int(n_samples), dtype=np.float64)
-    xc = dw.cs(y_grid)
-    dist2 = (float(x) - xc) ** 2 + (float(y) - y_grid) ** 2
-    yi = int(np.argmin(dist2))
-    y_opt = float(y_grid[yi])
-    return float(dw.get_road_center(y_opt)), y_opt
+    y_c = float(np.clip(y, margin, float(h - 1) - margin))
+    return float(dw.get_road_center(y_c)), y_c
 
 
 def find_start_pose_bottom(
@@ -401,6 +412,17 @@ def run_simulation() -> tuple[
             psi,
             lateral_px,
         )
+        if view is None and cfg.SIM_RETRY_VIEW_WITH_ROAD_HEADING:
+            psi_road = initial_heading_road_aligned(dw.cs, y)
+            view = get_view_from_pose(
+                world,
+                x,
+                y,
+                psi_road,
+                lateral_px,
+            )
+            if view is not None:
+                psi = psi_road
         if view is None:
             break
 
@@ -436,8 +458,13 @@ def run_simulation() -> tuple[
         y += step_dist_px * np.sin(psi)
         margin = float(cfg.DATASET_MAP_MARGIN)
         if cfg.SIM_PROJECT_REF_ONTO_MAIN_ROAD:
-            x, y = _snap_ref_to_main_centerline_graph(
+            x, y = _project_ref_onto_main_centerline_xy(
                 dw, x, y, margin=margin, h=h
+            )
+        wb = float(cfg.SIM_BLEND_PSI_TO_MAIN_ROAD)
+        if wb > 0.0:
+            psi = _blend_psi_toward(
+                psi, initial_heading_road_aligned(dw.cs, y), wb
             )
         path.append((float(x), float(y), float(psi)))
 
@@ -455,6 +482,9 @@ def run_simulation() -> tuple[
     elif cfg.SIM_FP_VIDEO_ENABLE and fp_video_abs is not None:
         # Enabled but no frames (e.g. immediate warp failure).
         fp_video_abs = None
+
+    n_steps = len(path) - 1
+    print(f"Simulation steps taken: {n_steps}")
 
     return world, path, ckpt, px_per_m, fp_video_abs
 

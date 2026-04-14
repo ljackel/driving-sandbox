@@ -9,8 +9,8 @@ import numpy as np
 
 import config as cfg
 
-# Try shorter look-ahead if the far line would leave the map (e.g. poses near the top edge).
-_FAR_SCALE_STEPS = (1.0, 0.75, 0.6, 0.45, 0.33, 0.25, 0.18, 0.12)
+# Try shorter look-ahead if the far line would leave the map (e.g. poses near the top edge or a fork).
+_FAR_SCALE_STEPS = (1.0, 0.75, 0.6, 0.45, 0.33, 0.25, 0.18, 0.12, 0.08, 0.06)
 
 
 def perspective_camera_view(

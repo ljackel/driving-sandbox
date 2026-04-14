@@ -49,10 +49,14 @@ SIM_FP_VIDEO_ENABLE = True
 # World: draw a secondary off-ramp in the bottom half of the BEV; optional dataset labels + κ for it.
 OFFRAMP_ENABLE = True
 # Simulation: DrivingNet ``take_offramp`` input. False = main-road policy (does **not** stop drift onto the ramp).
-SIM_TAKE_OFFRAMP = True
-# Simulation: after each step, snap the integrated BEV reference onto the main spline ``(cs(y), y)``.
-# Keeps open-loop roll-out from wandering onto the off-ramp pavement (intent alone cannot).
+SIM_TAKE_OFFRAMP = False
+# Simulation: after each step, set reference ``x = cs(y)`` with ``y`` from integration (clamped).
+# Stays on the main spline without the “stuck ego” artifact of Euclidean closest-point snapping.
 SIM_PROJECT_REF_ONTO_MAIN_ROAD = True
+# If the perspective warp fails (often near the off-ramp when ``psi`` points wrong), retry with main-road tangent.
+SIM_RETRY_VIEW_WITH_ROAD_HEADING = True
+# After each step, blend this fraction of the main-road heading into ``psi`` (0 = pure BC heading). Stabilizes warp.
+SIM_BLEND_PSI_TO_MAIN_ROAD = 0.22
 # ``DATASET_ALIGNED_PERTURB`` is computed later (depends on ``DATASET_PERTURBATIONS_ENABLE`` and ``PERTURB_*`` σ).
 
 # --- Bird's-eye world (generate_world.py) ---
@@ -301,7 +305,7 @@ SIM_DT = 0.05
 # Nudge upward slightly if behavioral cloning still under-steers in open loop.
 SIM_YAW_RATE_GAIN = _compute_sim_yaw_rate_gain()
 # Maximum simulation steps per ``simulate.run_simulation`` (hard cap; early exit may stop sooner).
-SIM_MAX_STEPS = 100
+SIM_MAX_STEPS = 1000
 # End roll-out when the centerline reference reaches the top drivable band (``y <= DATASET_MAP_MARGIN``).
 SIM_STOP_WHEN_REACHES_MAP_TOP = True
 # Meters from centerline toward driver's right; must match ``generate_dataset`` camera offset
