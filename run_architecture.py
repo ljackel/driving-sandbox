@@ -51,6 +51,7 @@ def _mermaid_block(model: DrivingNet) -> str:
     out = cfg.MODEL_OUTPUT_DIM
     if not model.use_transformer:
         fh = cfg.MODEL_FLATTEN_DIM
+        f1 = fh + 1
         return f"""flowchart TB
   IN["Input: (N, 3, {h}, {h})"]
   subgraph CNN["CNN backbone"]
@@ -58,8 +59,9 @@ def _mermaid_block(model: DrivingNet) -> str:
     C2["Conv2d {c1}→{c2}, k={k}, s={s} + ReLU"]
   end
   FL["Flatten → {fh}"]
-  OUT["Linear {fh}→{out} (steering = [:,0])"]
-  IN --> C1 --> C2 --> FL --> OUT
+  CAT["Concat take_offramp → {f1}"]
+  OUT["Linear {f1}→{out} (steering = [:,0])"]
+  IN --> C1 --> C2 --> FL --> CAT --> OUT
 """
     p = model.token_grid
     t = model.num_tokens
@@ -80,8 +82,9 @@ def _mermaid_block(model: DrivingNet) -> str:
     ENC["Encoder ×{L}: d={d}, heads={nh}, FFN={ff}"]
   end
   POOL2["Mean over tokens → (N, {d})"]
-  HEAD["Linear {d}→{out} (steering = [:,0])"]
-  IN --> C1 --> C2 --> POOL --> TOK --> PROJ --> ENC --> POOL2 --> HEAD
+  CAT["Concat take_offramp → (N, {d}+1)"]
+  HEAD["Linear {d}+1→{out} (steering = [:,0])"]
+  IN --> C1 --> C2 --> POOL --> TOK --> PROJ --> ENC --> POOL2 --> CAT --> HEAD
 """
 
 

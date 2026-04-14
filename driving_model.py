@@ -10,6 +10,7 @@ class DrivingNet(nn.Module):
     on the flattened conv map (controlled by ``MODEL_USE_TRANSFORMER_HEAD``).
 
     **Steering** is **channel 0**; training and simulation use only that channel (channel 1 is unused).
+    A scalar **take_offramp** (0/1) is concatenated to the pooled features before the final linear layer.
     """
 
     def __init__(self):
@@ -56,7 +57,7 @@ class DrivingNet(nn.Module):
                 enc_layer,
                 num_layers=cfg.MODEL_TRANSFORMER_NUM_LAYERS,
             )
-            self.head = nn.Linear(d, cfg.MODEL_OUTPUT_DIM)
+            self.head = nn.Linear(d + 1, cfg.MODEL_OUTPUT_DIM)
             self.mlp_head = None
         else:
             self.token_grid = 0
@@ -66,21 +67,32 @@ class DrivingNet(nn.Module):
             self.pos_embed = None
             self.encoder = None
             self.head = None
-            self.mlp_head = nn.Sequential(
-                nn.Flatten(),
-                nn.Linear(cfg.MODEL_FLATTEN_DIM, cfg.MODEL_OUTPUT_DIM),
-            )
+            self.mlp_flatten = nn.Flatten()
+            self.mlp_lin = nn.Linear(cfg.MODEL_FLATTEN_DIM + 1, cfg.MODEL_OUTPUT_DIM)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        take_offramp: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """
         Run the network on a batch of NCHW tensors.
 
         Args:
             x: Input images shaped ``(N, 3, H, W)`` with ``H, W`` matching ``CAMERA_IMAGE_SIZE``.
+            take_offramp: Per-sample intent ``(N,)`` or ``(N, 1)`` in ``{0, 1}``; if ``None``, uses zeros.
 
         Returns:
             Tensor of shape ``(N, MODEL_OUTPUT_DIM)``; steering for loss/sim is ``[..., 0]``.
         """
+        if take_offramp is None:
+            take_offramp = torch.zeros(
+                x.size(0), 1, device=x.device, dtype=x.dtype
+            )
+        elif take_offramp.dim() == 1:
+            take_offramp = take_offramp.unsqueeze(1)
+        take_offramp = take_offramp.to(dtype=x.dtype)
+
         x = self.backbone(x)
         if self.use_transformer:
             x = self.pool(x)
@@ -90,5 +102,8 @@ class DrivingNet(nn.Module):
             x = x + self.pos_embed
             x = self.encoder(x)
             x = x.mean(dim=1)
+            x = torch.cat([x, take_offramp], dim=1)
             return self.head(x)
-        return self.mlp_head(x)
+        x = self.mlp_flatten(x)
+        x = torch.cat([x, take_offramp], dim=1)
+        return self.mlp_lin(x)

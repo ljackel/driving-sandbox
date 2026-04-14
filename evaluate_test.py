@@ -104,9 +104,10 @@ def main():
 
     preds, gts = [], []
     with torch.no_grad():
-        for images, labels in loader:
+        for images, labels, take_or in loader:
             images = images.to(device)
-            out = model(images)
+            take_or = take_or.to(device)
+            out = model(images, take_or)
             pred = out[:, 0].detach().cpu()
             preds.append(pred)
             gts.append(labels)

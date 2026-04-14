@@ -73,11 +73,11 @@ def prepare_perspective_pil_for_model(im: Image.Image) -> Image.Image:
 
 class DrivingDataset(Dataset):
     """
-    PyTorch dataset: ``image_path`` and ``steering`` columns from ``labels.csv``.
+    PyTorch dataset: ``image_path``, ``steering``, and optional ``take_offramp`` from ``labels.csv``.
 
     Steering matches ``generate_dataset`` (scaled κ; recentering on perturbed rows when enabled in
     ``config``), clipped to
-    ``[STEERING_CLIP_MIN, STEERING_CLIP_MAX]``.
+    ``[STEERING_CLIP_MIN, STEERING_CLIP_MAX]``. Missing ``take_offramp`` is treated as 0 (main road).
     """
 
     def __init__(self, csv_file, root_dir, transform=None, path_prefix=None):
@@ -85,7 +85,7 @@ class DrivingDataset(Dataset):
         Load labels and optionally filter by path prefix (train vs test split).
 
         Args:
-            csv_file: Path to CSV with columns ``image_path``, ``steering``.
+            csv_file: Path to CSV with ``image_path``, ``steering``, optional ``take_offramp``.
             root_dir: Base directory prepended to each relative ``image_path``.
             transform: Optional torchvision-style transform applied to PIL RGB images.
             path_prefix: If set, keep only rows whose ``image_path`` starts with this
@@ -106,24 +106,26 @@ class DrivingDataset(Dataset):
 
     def __getitem__(self, idx):
         """
-        Load one image and steering scalar.
+        Load one image, steering scalar, and off-ramp intent (0 = main, 1 = ramp).
 
         Args:
             idx: Row index into the filtered dataframe.
 
         Returns:
-            Tuple ``(image, steering)`` where ``image`` is transformed tensor and
-            ``steering`` is ``float32`` scalar tensor.
+            Tuple ``(image, steering, take_offramp)`` — all ``float32`` tensors; intent shape ``()``.
         """
-        img_name = os.path.join(self.root_dir, self.driving_labels.iloc[idx, 0])
-        image = Image.open(img_name).convert('RGB')
-        
-        # 2. Get the steering angle or control command
-        steering = self.driving_labels.iloc[idx, 1]
-        steering = torch.tensor(float(steering), dtype=torch.float32)
+        row = self.driving_labels.iloc[idx]
+        img_name = os.path.join(self.root_dir, str(row["image_path"]))
+        image = Image.open(img_name).convert("RGB")
 
-        # 3. Apply transformations (like resizing)
+        steering = torch.tensor(float(row["steering"]), dtype=torch.float32)
+        if "take_offramp" in self.driving_labels.columns:
+            take = float(row["take_offramp"])
+        else:
+            take = 0.0
+        take_offramp = torch.tensor(take, dtype=torch.float32)
+
         if self.transform:
             image = self.transform(image)
 
-        return image, steering
+        return image, steering, take_offramp

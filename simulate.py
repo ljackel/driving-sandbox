@@ -18,6 +18,9 @@ each driver crop is written to ``sim_first_person.mp4`` (same preprocessing as t
 
 **Input crop:** ``PERSPECTIVE_INPUT_BOTTOM_HALF_ONLY`` matches ``train.py`` / ``evaluate_test.py`` (bottom
 half of the warp, then resize to ``CAMERA_IMAGE_SIZE``).
+
+**Intent:** ``SIM_TAKE_OFFRAMP`` is passed into ``DrivingNet`` as the scalar ``take_offramp`` input (same as
+training); open-loop pose integration still follows the main-road-style dynamics regardless.
 """
 from __future__ import annotations
 
@@ -394,7 +397,9 @@ def run_simulation() -> tuple[
 
         with torch.no_grad():
             inp = preprocess_bgr_for_model(view, device)
-            steering = float(model(inp)[0, 0].item())
+            intent = 1.0 if cfg.SIM_TAKE_OFFRAMP else 0.0
+            take_t = torch.tensor([[intent]], device=device, dtype=inp.dtype)
+            steering = float(model(inp, take_t)[0, 0].item())
 
         # Gain matches kappa_max * speed * px_per_m (see config._compute_sim_yaw_rate_gain).
         psi += steering * cfg.SIM_YAW_RATE_GAIN * cfg.SIM_DT

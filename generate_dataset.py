@@ -85,6 +85,34 @@ def get_perspective_view(
     return perspective_camera_view(world_img, near_c, f, r)
 
 
+def get_perspective_view_from_forward(
+    world_img,
+    pos_x,
+    pos_y,
+    fx,
+    fy,
+    lateral_offset_px=0.0,
+    yaw_offset_rad=0.0,
+):
+    """
+    Same warp as ``get_perspective_view`` but with an explicit unitless forward direction ``(fx, fy)``
+    in BEV (+x right, +y down), e.g. from a parametric off-ramp tangent.
+    """
+    norm = float(np.hypot(fx, fy))
+    if norm < 1e-9:
+        return None
+    fx, fy = fx / norm, fy / norm
+    rx, ry = -fy, fx
+    c = float(np.cos(yaw_offset_rad))
+    s = float(np.sin(yaw_offset_rad))
+    fx, fy = c * fx - s * fy, s * fx + c * fy
+    rx, ry = c * rx - s * ry, s * rx + c * ry
+    r = np.array([rx, ry], dtype=np.float32)
+    f = np.array([fx, fy], dtype=np.float32)
+    near_c = np.array([pos_x, pos_y], dtype=np.float32) + r * float(lateral_offset_px)
+    return perspective_camera_view(world_img, near_c, f, r)
+
+
 # Large lateral/yaw often pushes the BEV frustum off-map; scale the same draw down until it fits.
 _PERTURB_BACKOFF_SCALES = (1.0, 0.65, 0.4, 0.2, 0.08, 0.03, 0.01, 0.0)
 
@@ -153,7 +181,7 @@ def save_labels_csv(df: pd.DataFrame) -> str:
     writes ``LABELS_CSV_ALT`` instead.
 
     Args:
-        df: Rows with ``image_path`` and ``steering`` columns.
+        df: Rows with ``image_path``, ``steering``, and ``take_offramp`` columns.
 
     Returns:
         Path to the CSV that was successfully written.
@@ -292,6 +320,9 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES, num_test=cfg.NUM_TEST_FRAMES):
     **Test filenames:** ``test/frame_{0..num_test-1}.jpg`` (clean), then
     ``test/frame_{num_test..2*num_test-1}.jpg`` (perturbed) under the same perturbation conditions.
 
+    **Off-ramp:** when ``OFFRAMP_ENABLE`` and ``DATASET_OFFRAMP_LABELS_ENABLE``, also writes
+    ``train/offramp_*.jpg`` / ``test/offramp_*.jpg`` with ``take_offramp=1`` and κ from the Bézier.
+
     Args:
         num_train: Number of clean road samples (and of aligned perturbed mates if perturbing).
         num_test: Number of clean test samples (and of aligned perturbed mates if perturbing).
@@ -314,7 +345,7 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES, num_test=cfg.NUM_TEST_FRAMES):
     )
 
     margin = cfg.DATASET_MAP_MARGIN
-    records: list[tuple[str, float, float, float]] = []
+    records: list[tuple[str, float, float, float, int]] = []
 
     train_y, test_y = dataset_train_test_y(
         int(num_train),
@@ -346,7 +377,7 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES, num_test=cfg.NUM_TEST_FRAMES):
         _draw_train_near_vehicle_row_debug_bgr(view)
         cv2.imwrite(out, view)
         kappa = signed_path_curvature(dw.cs, yf)
-        records.append((rel_path, kappa, 0.0, 0.0))
+        records.append((rel_path, kappa, 0.0, 0.0, 0))
 
     perturb_train = cfg.DATASET_ALIGNED_PERTURB
     if perturb_train:
@@ -376,7 +407,7 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES, num_test=cfg.NUM_TEST_FRAMES):
             _draw_train_near_vehicle_row_debug_bgr(view)
             cv2.imwrite(out, view)
             kappa = signed_path_curvature(dw.cs, yf)
-            records.append((rel_path, kappa, lat_m, yaw_rad))
+            records.append((rel_path, kappa, lat_m, yaw_rad, 0))
             dbg = view.copy()
             annotate_perturb_debug_bgr(dbg, lat_m, yaw_rad, kappa)
             dbg_name = f"frame_{idx:04d}.jpg"
@@ -408,11 +439,41 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES, num_test=cfg.NUM_TEST_FRAMES):
                 _draw_train_near_vehicle_row_debug_bgr(view)
                 cv2.imwrite(out, view)
                 kappa = signed_path_curvature(dw.cs, yf)
-                records.append((rel_path, kappa, lat_m, yaw_rad))
+                records.append((rel_path, kappa, lat_m, yaw_rad, 0))
                 dbg = view.copy()
                 annotate_perturb_debug_bgr(dbg, lat_m, yaw_rad, kappa)
                 dbg_name = f"frame_{idx:04d}.jpg"
                 cv2.imwrite(os.path.join(debug_dir, dbg_name), dbg)
+
+    if (
+        cfg.OFFRAMP_ENABLE
+        and cfg.DATASET_OFFRAMP_LABELS_ENABLE
+        and int(cfg.DATASET_OFFRAMP_TRAIN_FRAMES) > 0
+    ):
+        n_or = int(cfg.DATASET_OFFRAMP_TRAIN_FRAMES)
+        u_grid = np.linspace(0.05, 0.95, n_or, dtype=np.float64)
+        for i, u in enumerate(u_grid):
+            ev = dw.offramp_bezier_evolution(float(u))
+            if ev is None:
+                continue
+            B, (fx, fy), kappa = ev
+            px, py = float(B[0]), float(B[1])
+            view = get_perspective_view_from_forward(
+                world,
+                px,
+                py,
+                fx,
+                fy,
+                lateral_offset_px=right_lane_offset_px,
+                yaw_offset_rad=0.0,
+            )
+            if view is None:
+                continue
+            rel_path = f"train/offramp_{i:04d}.jpg"
+            out = os.path.join(cfg.DATA_DIR, rel_path.replace("/", os.sep))
+            _draw_train_near_vehicle_row_debug_bgr(view)
+            cv2.imwrite(out, view)
+            records.append((rel_path, float(kappa), 0.0, 0.0, 1))
 
     # Test: same y grid shape as train (clean then aligned perturbed with matching indices).
     for i, yf in enumerate(test_y):
@@ -432,7 +493,7 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES, num_test=cfg.NUM_TEST_FRAMES):
         out = os.path.join(cfg.DATA_DIR, rel_path.replace("/", os.sep))
         cv2.imwrite(out, view)
         kappa = signed_path_curvature(dw.cs, yf)
-        records.append((rel_path, kappa, 0.0, 0.0))
+        records.append((rel_path, kappa, 0.0, 0.0, 0))
 
     perturb_test = cfg.DATASET_ALIGNED_PERTURB
     if perturb_test:
@@ -461,13 +522,42 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES, num_test=cfg.NUM_TEST_FRAMES):
             out = os.path.join(cfg.DATA_DIR, rel_path.replace("/", os.sep))
             cv2.imwrite(out, view)
             kappa = signed_path_curvature(dw.cs, yf)
-            records.append((rel_path, kappa, lat_m, yaw_rad))
+            records.append((rel_path, kappa, lat_m, yaw_rad, 0))
+
+    if (
+        cfg.OFFRAMP_ENABLE
+        and cfg.DATASET_OFFRAMP_LABELS_ENABLE
+        and int(cfg.DATASET_OFFRAMP_TEST_FRAMES) > 0
+    ):
+        n_ot = int(cfg.DATASET_OFFRAMP_TEST_FRAMES)
+        u_grid = np.linspace(0.05, 0.95, n_ot, dtype=np.float64)
+        for i, u in enumerate(u_grid):
+            ev = dw.offramp_bezier_evolution(float(u))
+            if ev is None:
+                continue
+            B, (fx, fy), kappa = ev
+            px, py = float(B[0]), float(B[1])
+            view = get_perspective_view_from_forward(
+                world,
+                px,
+                py,
+                fx,
+                fy,
+                lateral_offset_px=right_lane_offset_px,
+                yaw_offset_rad=0.0,
+            )
+            if view is None:
+                continue
+            rel_path = f"test/offramp_{i:04d}.jpg"
+            out = os.path.join(cfg.DATA_DIR, rel_path.replace("/", os.sep))
+            cv2.imwrite(out, view)
+            records.append((rel_path, float(kappa), 0.0, 0.0, 1))
 
     if records:
-        kappas = np.array([k for _, k, _, _ in records], dtype=np.float64)
+        kappas = np.array([k for _, k, _, _, _ in records], dtype=np.float64)
         scale = 1.0 / max(float(np.max(np.abs(kappas))), cfg.KAPPA_SCALE_EPS)
         rows = []
-        for path, k, lat_m, yaw_rad in records:
+        for path, k, lat_m, yaw_rad, take_or in records:
             kappa_scaled = float(k * scale)
             steering = (
                 kappa_scaled
@@ -484,6 +574,7 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES, num_test=cfg.NUM_TEST_FRAMES):
                             cfg.STEERING_CLIP_MAX,
                         )
                     ),
+                    "take_offramp": int(take_or),
                 }
             )
 
@@ -500,8 +591,8 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES, num_test=cfg.NUM_TEST_FRAMES):
             cv2.imwrite(os.path.join(cfg.DATA_DIR, "test_labeled", base), annotated)
 
         labels_path = save_labels_csv(pd.DataFrame(rows))
-        n_train = sum(1 for p, _, _, _ in records if p.startswith("train/"))
-        n_test = sum(1 for p, _, _, _ in records if p.startswith("test/"))
+        n_train = sum(1 for p, _, _, _, _ in records if p.startswith("train/"))
+        n_test = sum(1 for p, _, _, _, _ in records if p.startswith("test/"))
         extra = ""
         if perturb_train:
             extra = (
@@ -512,6 +603,12 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES, num_test=cfg.NUM_TEST_FRAMES):
             extra += (
                 f"; test includes perturbed frames (test/frame_{num_test:04d}.jpg through "
                 f"test/frame_{2 * num_test - 1:04d}.jpg, same sigma as train)"
+            )
+        if cfg.OFFRAMP_ENABLE and cfg.DATASET_OFFRAMP_LABELS_ENABLE:
+            extra += (
+                f"; off-ramp rows (take_offramp=1): "
+                f"{int(cfg.DATASET_OFFRAMP_TRAIN_FRAMES)} train, "
+                f"{int(cfg.DATASET_OFFRAMP_TEST_FRAMES)} test"
             )
         print(
             f"Data split complete. ({n_train} train, {n_test} test, labels in {labels_path!r}; "

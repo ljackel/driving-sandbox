@@ -11,9 +11,10 @@ Summary:
   counts; ``TOTAL_TRAIN_FRAMES`` / ``TOTAL_TEST_FRAMES`` are full split sizes after generation.
 - **Model input:** ``PERSPECTIVE_INPUT_BOTTOM_HALF_ONLY`` uses only the bottom half of each perspective
   crop (near-ego pixels), resized to ``CAMERA_IMAGE_SIZE``; otherwise the full crop is used.
-- **Labels:** Steering is ``kappa / max|kappa|`` over all CSV rows (``generate_dataset``). Lateral/yaw
-  recentering applies to perturbed rows when ``DATASET_PERTURBATIONS_ENABLE`` is true and ``PERTURB_*`` σ > 0.
-- **Training:** MSE on ``DrivingNet`` channel 0 only (CNN + transformer or linear readout); see ``MODEL_USE_TRANSFORMER_HEAD``, ``LEARNING_RATE``, ``EPOCHS``.
+- **Labels:** Steering is ``kappa / max|kappa|`` over all CSV rows (``generate_dataset``), including the
+  optional off-ramp Bézier when ``OFFRAMP_ENABLE`` and ``DATASET_OFFRAMP_LABELS_ENABLE``. Column ``take_offramp`` (0 = main road, 1 = ramp) is an extra model input. Lateral/yaw recentering applies
+  to perturbed rows when ``DATASET_PERTURBATIONS_ENABLE`` is true and ``PERTURB_*`` σ > 0.
+- **Training:** MSE on ``DrivingNet`` channel 0 only with ``take_offramp`` concatenated to the head input; see ``MODEL_USE_TRANSFORMER_HEAD``, ``LEARNING_RATE``, ``EPOCHS``.
 - **Simulation:** ``SIM_YAW_RATE_GAIN`` from ``_compute_sim_yaw_rate_gain`` aligns ``psi += steering * gain * dt``
   with curvature step semantics on the train/test ``y`` grid. Optional first-person MP4: ``SIM_FP_VIDEO_*``.
 """
@@ -43,7 +44,7 @@ DATASET_PERTURBATIONS_ENABLE = True
 MODEL_USE_TRANSFORMER_HEAD = True
 # Simulation: write first-person MP4 during roll-out.
 SIM_FP_VIDEO_ENABLE = True
-# World: draw a secondary off-ramp in the bottom half of the BEV (visual only; main spline unchanged).
+# World: draw a secondary off-ramp in the bottom half of the BEV; optional dataset labels + κ for it.
 OFFRAMP_ENABLE = True
 # ``DATASET_ALIGNED_PERTURB`` is computed later (depends on ``DATASET_PERTURBATIONS_ENABLE`` and ``PERTURB_*`` σ).
 
@@ -121,6 +122,11 @@ DATASET_MAP_MARGIN = 80
 # Clean grid size per split; with aligned perturbations on, total files = 2 × this (half clean, half perturbed).
 NUM_TRAIN_FRAMES = 200
 NUM_TEST_FRAMES = 200
+# Extra train/test images on the off-ramp (``train/offramp_*.jpg``, ``test/offramp_*.jpg``) with
+# ``take_offramp=1``; ignored unless ``OFFRAMP_ENABLE`` and ``DATASET_OFFRAMP_LABELS_ENABLE``.
+DATASET_OFFRAMP_LABELS_ENABLE = True
+DATASET_OFFRAMP_TRAIN_FRAMES = NUM_TRAIN_FRAMES
+DATASET_OFFRAMP_TEST_FRAMES = NUM_TEST_FRAMES
 # Camera lateral (m) = LANE_WIDTH_METERS × fraction: from spline (lane divider) along driver's-right
 # toward the outer edge. 0.5 = geometric center of the right lane; lower if the view hugs the outer edge.
 DATASET_RIGHT_LANE_LATERAL_FRAC = 0.45
@@ -143,6 +149,16 @@ DATASET_ALIGNED_PERTURB = bool(
     DATASET_PERTURBATIONS_ENABLE
     and (PERTURB_LATERAL_STD_M > 0.0 or PERTURB_YAW_STD_DEG > 0.0)
 )
+_DATASET_OFFRAMP_TRAIN_N = (
+    int(DATASET_OFFRAMP_TRAIN_FRAMES)
+    if (OFFRAMP_ENABLE and DATASET_OFFRAMP_LABELS_ENABLE)
+    else 0
+)
+_DATASET_OFFRAMP_TEST_N = (
+    int(DATASET_OFFRAMP_TEST_FRAMES)
+    if (OFFRAMP_ENABLE and DATASET_OFFRAMP_LABELS_ENABLE)
+    else 0
+)
 # Rows in ``labels.csv`` / image files per split after generation. ``NUM_TRAIN_FRAMES`` and
 # ``NUM_TEST_FRAMES`` count **clean** grid positions only.
 TOTAL_TRAIN_FRAMES = int(
@@ -152,9 +168,12 @@ TOTAL_TRAIN_FRAMES = int(
         if DATASET_ALIGNED_PERTURB
         else 0
     )
+    + _DATASET_OFFRAMP_TRAIN_N
 )
 TOTAL_TEST_FRAMES = int(
-    NUM_TEST_FRAMES + (NUM_TEST_FRAMES if DATASET_ALIGNED_PERTURB else 0)
+    NUM_TEST_FRAMES
+    + (NUM_TEST_FRAMES if DATASET_ALIGNED_PERTURB else 0)
+    + _DATASET_OFFRAMP_TEST_N
 )
 # Companion images for perturbed train views (lat/yaw/κ); not listed in labels.csv.
 TRAIN_PERTURB_DEBUG_SUBDIR = "train_perturb_debug"
@@ -263,6 +282,8 @@ def _compute_sim_yaw_rate_gain() -> float:
         k = abs(float(signed_path_curvature(dw.cs, float(yf))))
         if k > kmax:
             kmax = k
+    if OFFRAMP_ENABLE and DATASET_OFFRAMP_LABELS_ENABLE:
+        kmax = max(kmax, float(dw.offramp_max_abs_curvature()))
     px_per_m = float(WORLD_IMAGE_SIZE / WORLD_METERS)
     return float(kmax * SIM_SPEED_M_S * px_per_m)
 
@@ -277,6 +298,8 @@ SIM_MAX_STEPS = 200_000
 # Meters from centerline toward driver's right; must match ``generate_dataset`` camera offset
 # (``LANE_WIDTH_METERS * DATASET_RIGHT_LANE_LATERAL_FRAC``). Pixels = this × ``px_per_m`` in sim.
 SIM_EGO_LATERAL_OFFSET_M = LANE_WIDTH_METERS * DATASET_RIGHT_LANE_LATERAL_FRAC
+# Extra scalar input to ``DrivingNet`` (1 = intend off-ramp, 0 = stay on main road), matching training.
+SIM_TAKE_OFFRAMP = False
 # Start as low as possible: try y = h-1, then move up until perspective warp fits.
 SIM_START_MAX_INSET_PX = 200
 # First-person video from ``simulate.run_simulation`` (same resolution as ``CAMERA_IMAGE_SIZE``); gated by ``SIM_FP_VIDEO_ENABLE`` (switches above).

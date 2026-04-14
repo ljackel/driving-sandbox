@@ -1,5 +1,5 @@
 """
-Train ``DrivingNet`` on ``data/labels.csv`` (MSE on output **channel 0** vs steering targets).
+Train ``DrivingNet`` on ``data/labels.csv`` (MSE on output **channel 0** vs steering targets, with ``take_offramp`` input).
 
 Uses rows with ``train/`` prefix for training and ``test/`` for validation (geographic or mixed road
 sampling per ``generate_dataset`` / ``DATASET_MIX_TRAIN_TEST_GEOGRAPHY``). Checkpoints on best test
@@ -90,7 +90,7 @@ test_loader = (
     else None
 )
 
-# 4. Initialize Model, Loss, and Optimizer (MSE on steering head only: outputs[:, 0])
+# 4. Initialize Model, Loss, and Optimizer (MSE on steering head only: outputs[:, 0]; intent concat)
 model = DrivingNet().to(device)
 criterion = nn.MSELoss()
 optimizer = optim.Adam(model.parameters(), lr=learning_rate)
@@ -138,11 +138,12 @@ _train_wall_start = time.perf_counter()
 for epoch in range(epochs):
     train_sse = 0.0
     train_n = 0
-    for images, labels in train_loader:
+    for images, labels, take_or in train_loader:
         images, labels = images.to(device), labels.to(device)
+        take_or = take_or.to(device)
 
         # Forward pass (no .squeeze(): batch size 1 would drop the batch dim and break [:, 0])
-        outputs = model(images)
+        outputs = model(images, take_or)
         loss = criterion(outputs[:, 0], labels)  # steering channel 0
 
         optimizer.zero_grad()
@@ -170,9 +171,10 @@ for epoch in range(epochs):
         test_sse = 0.0
         test_n = 0
         with torch.no_grad():
-            for images, labels in test_loader:
+            for images, labels, take_or in test_loader:
                 images, labels = images.to(device), labels.to(device)
-                outputs = model(images)
+                take_or = take_or.to(device)
+                outputs = model(images, take_or)
                 batch_loss = criterion(outputs[:, 0], labels)
                 test_sse += batch_loss.item() * labels.size(0)
                 test_n += labels.size(0)

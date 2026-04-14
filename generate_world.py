@@ -6,6 +6,22 @@ from scipy.interpolate import CubicSpline
 import config as cfg
 
 
+def _bezier_quadratic_xy_d1_d2(
+    p0: np.ndarray,
+    p1: np.ndarray,
+    p2: np.ndarray,
+    u: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Quadratic Bézier ``B(u)`` and parametric derivatives ``B'(u)``, ``B''(u)`` (column vectors)."""
+    u = float(np.clip(u, 0.0, 1.0))
+    omu = 1.0 - u
+    B = omu**2 * p0 + 2.0 * omu * u * p1 + u**2 * p2
+    d1 = -2.0 * omu * p0 + 2.0 * (1.0 - 2.0 * u) * p1 + 2.0 * u * p2
+    d2 = 2.0 * p0 - 4.0 * p1 + 2.0 * p2
+    return B, d1, d2
+
+
+
 class DrivingWorld:
     """
     Top-down raster map: cubic-spline centerline from ``SPLINE_X_DELTAS_BOTTOM_TO_TOP``, two-lane road,
@@ -75,12 +91,12 @@ class DrivingWorld:
         yi = np.interp(t, s, p[:, 1])
         return np.column_stack((xi, yi)).astype(np.int32)
 
-    def _offramp_centerline_points(self) -> np.ndarray | None:
+    def _offramp_bezier_controls(self) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
         """
-        Dense integer polyline ``(N, 2)`` as ``(x, y)`` for the off-ramp, or ``None`` if disabled.
+        Quadratic Bézier control points ``p0, p1, p2`` (image px), or ``None`` if the off-ramp is off.
 
-        Quadratic Bézier from the branch: the first control point lies on the main-road tangent
-        (traffic toward decreasing ``y``) so departure is smooth, not a sharp kink.
+        ``p0`` is on the main centerline; ``p1`` lies along the main-road tangent (traffic toward
+        decreasing ``y``) so departure is smooth.
         """
         if not cfg.OFFRAMP_ENABLE:
             return None
@@ -89,7 +105,6 @@ class DrivingWorld:
             return None
         p0 = np.array([float(self.cs(y0)), y0], dtype=np.float64)
         dxdy = float(self.cs(y0, nu=1))
-        # Unit tangent for motion with decreasing y (toward map top), along the centerline.
         t = np.array([-dxdy, -1.0], dtype=np.float64)
         t_norm = float(np.linalg.norm(t))
         if t_norm <= 1e-9:
@@ -101,6 +116,14 @@ class DrivingWorld:
         p2 = p0 + np.array(
             [float(cfg.OFFRAMP_END_DX_PX), float(cfg.OFFRAMP_END_DY_PX)], dtype=np.float64
         )
+        return p0, p1, p2
+
+    def _offramp_centerline_points(self) -> np.ndarray | None:
+        """Dense integer polyline ``(N, 2)`` as ``(x, y)`` for the off-ramp, or ``None`` if disabled."""
+        ctrl = self._offramp_bezier_controls()
+        if ctrl is None:
+            return None
+        p0, p1, p2 = ctrl
         n_bez = 96
         u = np.linspace(0.0, 1.0, n_bez, dtype=np.float64)
         omu = 1.0 - u
@@ -112,6 +135,46 @@ class DrivingWorld:
         pts[:, 0] = np.clip(pts[:, 0], 0.0, float(self.size - 1))
         pts[:, 1] = np.clip(pts[:, 1], 0.0, float(self.size - 1))
         return self._densify_polyline(pts.astype(np.float64), max(120, n_bez * 4))
+
+    def offramp_bezier_evolution(
+        self, u: float
+    ) -> tuple[np.ndarray, tuple[float, float], float] | None:
+        """
+        Position on the off-ramp, unit forward ``(fx, fy)`` in BEV (+x right, +y down), signed κ.
+
+        Curvature uses the standard parametric formula in image coordinates (matches ``generate_dataset``
+        scaling when combined with main-road κ in one global ``max|κ|``).
+        """
+        ctrl = self._offramp_bezier_controls()
+        if ctrl is None:
+            return None
+        p0, p1, p2 = ctrl
+        B, d1, d2 = _bezier_quadratic_xy_d1_d2(p0, p1, p2, u)
+        xp, yp = float(d1[0]), float(d1[1])
+        xpp, ypp = float(d2[0]), float(d2[1])
+        vnorm = float(np.hypot(xp, yp))
+        if vnorm <= cfg.CURVATURE_DENOM_EPS:
+            return B.astype(np.float64), (0.0, -1.0), 0.0
+        fx, fy = xp / vnorm, yp / vnorm
+        denom = vnorm**3
+        if denom < cfg.CURVATURE_DENOM_EPS:
+            kappa = 0.0
+        else:
+            kappa = (xp * ypp - yp * xpp) / denom
+        return B.astype(np.float64), (float(fx), float(fy)), float(kappa)
+
+    def offramp_max_abs_curvature(self, n: int = 128) -> float:
+        """Max ``|κ|`` along the Bézier (for ``SIM_YAW_RATE_GAIN`` vs dataset κ scaling)."""
+        if self._offramp_bezier_controls() is None:
+            return 0.0
+        ugrid = np.linspace(0.02, 0.98, int(n), dtype=np.float64)
+        m = 0.0
+        for u in ugrid:
+            ev = self.offramp_bezier_evolution(float(u))
+            if ev is None:
+                continue
+            m = max(m, abs(float(ev[2])))
+        return float(m)
 
     @staticmethod
     def _draw_road_polyline(
