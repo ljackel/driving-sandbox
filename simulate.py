@@ -19,8 +19,9 @@ each driver crop is written to ``sim_first_person.mp4`` (same preprocessing as t
 **Input crop:** ``PERSPECTIVE_INPUT_BOTTOM_HALF_ONLY`` matches ``train.py`` / ``evaluate_test.py`` (bottom
 half of the warp, then resize to ``CAMERA_IMAGE_SIZE``).
 
-**Intent:** ``SIM_TAKE_OFFRAMP`` is passed into ``DrivingNet`` as the scalar ``take_offramp`` input (same as
-training); open-loop pose integration still follows the main-road-style dynamics regardless.
+**Intent:** ``SIM_TAKE_OFFRAMP`` selects which steering targets the net emulates (main vs ramp). It does **not**
+pin the vehicle to a lane: the policy still steers from pixels, so use ``SIM_PROJECT_REF_ONTO_MAIN_ROAD`` to
+reproject the integrated reference onto the main centerline each step when an off-ramp is drawn.
 """
 from __future__ import annotations
 
@@ -273,6 +274,30 @@ def _right_lane_overlay_xy(
     return x + rx * lateral_offset_px, y + ry * lateral_offset_px
 
 
+def _snap_ref_to_main_centerline_graph(
+    dw: DrivingWorld,
+    x: float,
+    y: float,
+    *,
+    margin: float,
+    h: int,
+    n_samples: int = 512,
+) -> tuple[float, float]:
+    """
+    Closest point on the main-road graph ``(x, y) = (cs(y'), y')`` to the integrated reference ``(x, y)``.
+
+    Coarse grid search in ``y'`` is sufficient to keep open-loop BC from drifting onto a separate off-ramp polyline.
+    """
+    y_lo = float(margin)
+    y_hi = float(max(y_lo + 1.0, h - 1.0 - margin))
+    y_grid = np.linspace(y_lo, y_hi, int(n_samples), dtype=np.float64)
+    xc = dw.cs(y_grid)
+    dist2 = (float(x) - xc) ** 2 + (float(y) - y_grid) ** 2
+    yi = int(np.argmin(dist2))
+    y_opt = float(y_grid[yi])
+    return float(dw.get_road_center(y_opt)), y_opt
+
+
 def find_start_pose_bottom(
     world_bgr: np.ndarray,
     dw: DrivingWorld,
@@ -320,6 +345,10 @@ def run_simulation() -> tuple[
     """
     Load the newest checkpoint and roll out: crop -> ``DrivingNet`` channel 0 -> yaw rate via
     ``SIM_YAW_RATE_GAIN`` -> integrate ``(x, y, psi)`` with step length ``SIM_SPEED_M_S * SIM_DT * px_per_m``.
+
+    Stops early when ``SIM_STOP_WHEN_REACHES_MAP_TOP`` and the reference reaches ``y <= DATASET_MAP_MARGIN``
+    (needed when ``SIM_PROJECT_REF_ONTO_MAIN_ROAD`` keeps the pose in-bounds; otherwise the loop can run
+    ``SIM_MAX_STEPS`` times).
 
     When ``SIM_FP_VIDEO_ENABLE`` is true, writes each driver crop (plus a final pose frame when
     available) to ``<simulation_output_dir>/<SIM_FP_VIDEO_FILENAME>`` at ``SIM_VIDEO_FPS``.
@@ -405,8 +434,15 @@ def run_simulation() -> tuple[
         psi += steering * cfg.SIM_YAW_RATE_GAIN * cfg.SIM_DT
         x += step_dist_px * np.cos(psi)
         y += step_dist_px * np.sin(psi)
+        margin = float(cfg.DATASET_MAP_MARGIN)
+        if cfg.SIM_PROJECT_REF_ONTO_MAIN_ROAD:
+            x, y = _snap_ref_to_main_centerline_graph(
+                dw, x, y, margin=margin, h=h
+            )
         path.append((float(x), float(y), float(psi)))
 
+        if cfg.SIM_STOP_WHEN_REACHES_MAP_TOP and float(y) <= margin:
+            break
         if x < 0 or x >= w or y < 0 or y >= h:
             break
 

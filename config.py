@@ -14,7 +14,7 @@ Summary:
 - **Labels:** Steering is ``kappa / max|kappa|`` over all CSV rows (``generate_dataset``), including the
   optional off-ramp Bézier when ``OFFRAMP_ENABLE`` and ``DATASET_OFFRAMP_LABELS_ENABLE``. Column ``take_offramp`` (0 = main road, 1 = ramp) is an extra model input. Lateral/yaw recentering applies
   to perturbed rows when ``DATASET_PERTURBATIONS_ENABLE`` is true and ``PERTURB_*`` σ > 0.
-- **Training:** MSE on ``DrivingNet`` channel 0 only with ``take_offramp`` concatenated to the head input; see ``MODEL_USE_TRANSFORMER_HEAD``, ``LEARNING_RATE``, ``EPOCHS``.
+- **Training:** MSE on ``DrivingNet`` channel 0 only with ``take_offramp`` concatenated to the head input; ``EPOCHS`` is in switches; see ``MODEL_USE_TRANSFORMER_HEAD``, ``LEARNING_RATE``.
 - **Simulation:** ``SIM_YAW_RATE_GAIN`` from ``_compute_sim_yaw_rate_gain`` aligns ``psi += steering * gain * dt``
   with curvature step semantics on the train/test ``y`` grid. Optional first-person MP4: ``SIM_FP_VIDEO_*``.
 """
@@ -42,10 +42,17 @@ DATASET_SAMPLE_UNIFORM_ALONG_ROAD = True
 DATASET_PERTURBATIONS_ENABLE = True
 # Model: true = Transformer head; false = Flatten + linear to MODEL_OUTPUT_DIM.
 MODEL_USE_TRANSFORMER_HEAD = True
+# Training: number of epochs per ``train.py`` run.
+EPOCHS = 20
 # Simulation: write first-person MP4 during roll-out.
 SIM_FP_VIDEO_ENABLE = True
 # World: draw a secondary off-ramp in the bottom half of the BEV; optional dataset labels + κ for it.
 OFFRAMP_ENABLE = True
+# Simulation: DrivingNet ``take_offramp`` input. False = main-road policy (does **not** stop drift onto the ramp).
+SIM_TAKE_OFFRAMP = True
+# Simulation: after each step, snap the integrated BEV reference onto the main spline ``(cs(y), y)``.
+# Keeps open-loop roll-out from wandering onto the off-ramp pavement (intent alone cannot).
+SIM_PROJECT_REF_ONTO_MAIN_ROAD = True
 # ``DATASET_ALIGNED_PERTURB`` is computed later (depends on ``DATASET_PERTURBATIONS_ENABLE`` and ``PERTURB_*`` σ).
 
 # --- Bird's-eye world (generate_world.py) ---
@@ -237,8 +244,7 @@ MODEL_OUTPUT_DIM = 2
 BATCH_SIZE = 16
 # Adam: ``1e-3`` often stalls near predicting mean steering; ``3e-4`` (or ``1e-4``) fits this task reliably.
 LEARNING_RATE = 3e-4
-# Increase when the dataset grows; ``CHECKPOINT_MIN_EPOCH`` delays best-metric checkpoints.
-EPOCHS = 100
+# ``EPOCHS`` is in switches at top. ``CHECKPOINT_MIN_EPOCH`` (below) delays best-metric checkpoints.
 # Used by ``reproducibility.set_global_seed`` and train ``DataLoader`` shuffle generator.
 TRAIN_SEED = 42
 # First 1..(N-1) epochs are warmup: no best-metric tracking, checkpoints, or best-loss coloring.
@@ -294,12 +300,13 @@ SIM_DT = 0.05
 # Heading rate (rad/s) per unit network output; derived from κ_max and speed (see ``_compute_sim_yaw_rate_gain``).
 # Nudge upward slightly if behavioral cloning still under-steers in open loop.
 SIM_YAW_RATE_GAIN = _compute_sim_yaw_rate_gain()
-SIM_MAX_STEPS = 200_000
+# Maximum simulation steps per ``simulate.run_simulation`` (hard cap; early exit may stop sooner).
+SIM_MAX_STEPS = 100
+# End roll-out when the centerline reference reaches the top drivable band (``y <= DATASET_MAP_MARGIN``).
+SIM_STOP_WHEN_REACHES_MAP_TOP = True
 # Meters from centerline toward driver's right; must match ``generate_dataset`` camera offset
 # (``LANE_WIDTH_METERS * DATASET_RIGHT_LANE_LATERAL_FRAC``). Pixels = this × ``px_per_m`` in sim.
 SIM_EGO_LATERAL_OFFSET_M = LANE_WIDTH_METERS * DATASET_RIGHT_LANE_LATERAL_FRAC
-# Extra scalar input to ``DrivingNet`` (1 = intend off-ramp, 0 = stay on main road), matching training.
-SIM_TAKE_OFFRAMP = False
 # Start as low as possible: try y = h-1, then move up until perspective warp fits.
 SIM_START_MAX_INSET_PX = 200
 # First-person video from ``simulate.run_simulation`` (same resolution as ``CAMERA_IMAGE_SIZE``); gated by ``SIM_FP_VIDEO_ENABLE`` (switches above).
