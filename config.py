@@ -12,7 +12,7 @@ Summary:
   crop (near-ego pixels), resized to ``CAMERA_IMAGE_SIZE``; otherwise the full crop is used.
 - **Labels:** Steering is ``kappa / max|kappa|`` over all CSV rows (``generate_dataset``). Lateral/yaw
   recentering applies to perturbed rows when ``DATASET_PERTURBATIONS_ENABLE`` is true and ``PERTURB_*`` σ > 0.
-- **Training:** MSE on ``DrivingNet`` channel 0 only; see ``LEARNING_RATE``, ``EPOCHS``.
+- **Training:** MSE on ``DrivingNet`` channel 0 only (CNN + transformer head); see ``LEARNING_RATE``, ``EPOCHS``.
 - **Simulation:** ``SIM_YAW_RATE_GAIN`` from ``_compute_sim_yaw_rate_gain`` aligns ``psi += steering * gain * dt``
   with curvature step semantics on the train/test ``y`` grid. Optional first-person MP4: ``SIM_FP_VIDEO_*``.
 """
@@ -161,8 +161,13 @@ _MODEL_SPATIAL = _spatial_after_convs(
     CAMERA_IMAGE_SIZE, MODEL_NUM_CONV_BLOCKS, MODEL_KERNEL_SIZE, MODEL_STRIDE
 )
 MODEL_FLATTEN_DIM = MODEL_CONV2_CHANNELS * _MODEL_SPATIAL * _MODEL_SPATIAL
-# Width of both fully connected hidden layers after the conv stack.
-MODEL_FC_HIDDEN_DIM = 1000
+# CNN → ``AdaptiveAvgPool2d`` to this side length → ``token_grid²`` sequence tokens for the transformer head.
+MODEL_TRANSFORMER_TOKEN_GRID = 7
+MODEL_TRANSFORMER_D_MODEL = 128
+MODEL_TRANSFORMER_NHEAD = 4
+MODEL_TRANSFORMER_NUM_LAYERS = 2
+MODEL_TRANSFORMER_FF_DIM = 256
+MODEL_TRANSFORMER_DROPOUT = 0.1
 # ``train.py`` / ``simulate.py`` / ``evaluate_test.py`` use **channel 0** as steering; channel 1 is unused in the loss.
 MODEL_OUTPUT_DIM = 2
 
