@@ -6,8 +6,8 @@ Summary:
 - **World:** S-curve from ``SPLINE_X_DELTAS_BOTTOM_TO_TOP`` (``generate_world``).
 - **Dataset:** By default train = bottom BEV half, test = top half. Roadkill: ``ROADKILL_OBSTACLE_Y_PX`` defines
   supervised detours; ``ROADKILL_EVAL_ONLY_OBSTACLE_Y_PX`` is drawn and used in sim only (generalization).
-  If ``DATASET_MIX_TRAIN_TEST_GEOGRAPHY`` is
-  true, both splits sample the full road via shuffle-split (``DATASET_SEED``). ``DATASET_SAMPLE_UNIFORM_ALONG_ROAD``
+  ``DATASET_MIX_TRAIN_TEST_GEOGRAPHY`` only shuffles row order within each half (train stays bottom BEV,
+  test top). ``DATASET_SEED`` controls that shuffle when enabled. ``DATASET_SAMPLE_UNIFORM_ALONG_ROAD``
   chooses equal spacing along the main road (and along the off-ramp Bézier) vs uniform ``y`` / ``u``. Perturbed duplicate frames:
   ``DATASET_PERTURBATIONS_ENABLE`` plus ``PERTURB_*``. ``NUM_TRAIN_FRAMES`` / ``NUM_TEST_FRAMES`` are clean-grid
   counts; ``TOTAL_TRAIN_FRAMES`` / ``TOTAL_TEST_FRAMES`` are full split sizes after generation.
@@ -40,7 +40,7 @@ LABELS_TMP = "labels.partial.tmp"
 # --- Switches (feature toggles; adjust these first) ---
 # Perspective: use only bottom half of warp before resize (train / eval / sim).
 PERSPECTIVE_INPUT_BOTTOM_HALF_ONLY = False
-# Dataset: false = train bottom BEV half, test top half; true = shuffle-split full road for both.
+# Dataset: train rows always bottom BEV half, test always top half; when true, shuffle order within each half.
 DATASET_MIX_TRAIN_TEST_GEOGRAPHY = False
 # Dataset: if true, clean main-road samples are uniform in **arc length** along the centerline; off-ramp samples
 # are uniform in arc length along the Bézier (between the usual ``u`` inset). If false, main uses uniform ``y``;
@@ -146,9 +146,13 @@ ROADKILL_ALONG_MAX_LANE_WIDTHS = 2.2
 # Off-ramp geometry (see ``OFFRAMP_ENABLE`` in switches): branch on main centerline; image-row fraction
 # (0 = top, 1 = bottom). Must be > 0.5 for bottom-half exit; ignored otherwise.
 OFFRAMP_BRANCH_Y_FRAC = 0.78
-# Additional exits at explicit BEV ``y`` rows (pixels). Each gets the same Bézier deltas as above.
+# Additional exits at explicit BEV ``y`` rows (pixels). Default geometry matches ``OFFRAMP_TANGENT_CTRL_PX``
+# / ``OFFRAMP_END_*``; use ``OFFRAMP_BRANCH_BEZIER_OVERRIDE_BY_Y_PX`` to customize a branch row.
 # Sorted with the primary branch by ``y`` (descending): first encountered when driving from the map bottom.
-OFFRAMP_EXTRA_BRANCH_Y_PX = (200.0,)
+OFFRAMP_EXTRA_BRANCH_Y_PX = (250.0,)
+# Optional per branch row: ``y`` (px) → ``(tangent_ctrl_px, end_dx_px, end_dy_px)`` for a gentler/sharper peel.
+# Longer ``tangent_ctrl`` + moderate ``end_dx`` yields a gradual exit toward +x (driver's right in BEV).
+OFFRAMP_BRANCH_BEZIER_OVERRIDE_BY_Y_PX = {250.0: (185.0, 175.0, 295.0)}
 # Quadratic Bézier from branch: control point lies ``OFFRAMP_TANGENT_CTRL_PX`` along the **main-road tangent**
 # (traffic toward decreasing ``y``) so the merge is not a sharp kink; end vertex is branch + (Δx, Δy).
 OFFRAMP_TANGENT_CTRL_PX = 95.0

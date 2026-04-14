@@ -14,9 +14,9 @@ false for unconstrained ``(x,y)`` integration (can leave the lane).
 
 **Visualization:** The live BEV trail (pink/lavender polyline) follows the **right-lane** footprint, matching the scaled top-down ego car icon; **yellow bars** mark
 clean **main-road** training sample locations (same ``y`` grid as ``generate_dataset``). When off-ramp
-dataset rows are enabled, **orange bars** mark ramp samples (same spacing as ``train/offramp_*.jpg``:
-arc length along the Bézier when ``DATASET_SAMPLE_UNIFORM_ALONG_ROAD``; counts follow
-``DATASET_OFFRAMP_MATCH_MAIN_SPACING`` like ``generate_dataset``).
+dataset rows are enabled, **orange bars** mark ramp train samples (same as ``train/offramp_*.jpg``:
+uniform arc length along each ramp at the **main-road train mean spacing** ``δ``, on the in-train
+BEV segment; capped by ``DATASET_OFFRAMP_*`` when ``DATASET_OFFRAMP_MATCH_MAIN_SPACING``).
 With ``SIM_FP_VIDEO_ENABLE``,
 each driver crop is written to ``sim_first_person.mp4`` (same preprocessing as the model when
 ``PERSPECTIVE_INPUT_BOTTOM_HALF_ONLY`` is true: bottom half of the warp, resized to ``CAMERA_IMAGE_SIZE``).
@@ -61,6 +61,7 @@ from data_loader import count_train_test_examples, train_perturb_stats_from_labe
 from dataset_split import (
     dataset_train_test_y,
     offramp_clean_counts_matching_main_spacing,
+    offramp_train_u_rid_pairs_main_spacing,
 )
 from perspective_camera import perspective_camera_view
 from reproducibility import set_global_seed
@@ -362,9 +363,12 @@ def _draw_offramp_train_sampling_bars_on_bev(
     dw: DrivingWorld,
     n_ramp_train_frames: int,
     lateral_offset_px: float,
+    *,
+    num_main_train: int,
 ) -> None:
     """
-    Draw orange bars where ``generate_dataset`` places clean off-ramp train crops (``u`` in ``[0.05, 0.95]``).
+    Draw orange bars where ``generate_dataset`` places off-ramp train crops: uniform arc length along
+    each ramp at the same mean spacing as main-road train rows (within the train BEV band).
     """
     if n_ramp_train_frames <= 0 or dw.offramp_num() <= 0:
         return
@@ -372,16 +376,16 @@ def _draw_offramp_train_sampling_bars_on_bev(
     orange_bgr = (0, 200, 255)
     n_r = int(n_ramp_train_frames)
     n_br = max(1, dw.offramp_num())
-    u_by_rid: list[np.ndarray] = []
-    for rid in range(n_br):
-        u_by_rid.append(
-            dw.offramp_u_samples_uniform_arc_length(n_r, ramp_id=rid)
-            if cfg.DATASET_SAMPLE_UNIFORM_ALONG_ROAD
-            else np.linspace(0.05, 0.95, n_r, dtype=np.float64)
-        )
-    for i in range(n_r):
-        rid = i % n_br
-        u = float(u_by_rid[rid][i])
+    pairs = offramp_train_u_rid_pairs_main_spacing(
+        dw,
+        int(dw.size),
+        int(cfg.DATASET_MAP_MARGIN),
+        n_br,
+        int(num_main_train),
+        n_r,
+        uniform_along_ramp=cfg.DATASET_SAMPLE_UNIFORM_ALONG_ROAD,
+    )
+    for u, rid in pairs:
         ev = dw.offramp_bezier_evolution(u, rid)
         if ev is None:
             continue
@@ -1761,6 +1765,7 @@ def main() -> None:
             dw_overlay,
             int(n_offramp_train_vis),
             float(cfg.SIM_EGO_LATERAL_OFFSET_M) * px_per_m,
+            num_main_train=int(cfg.NUM_TRAIN_FRAMES),
         )
     poly_xy: list[list[float]] = []
     for i in range(len(path) - 1):

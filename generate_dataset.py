@@ -22,6 +22,7 @@ set_global_seed(cfg.DATASET_SEED)
 from dataset_split import (
     dataset_train_test_y,
     offramp_clean_counts_matching_main_spacing,
+    offramp_train_u_rid_pairs_main_spacing,
 )
 from generate_world import DrivingWorld, lateral_offset_px_avoid_roadkill
 
@@ -338,9 +339,9 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES, num_test=cfg.NUM_TEST_FRAMES):
 
     **Off-ramp:** when ``OFFRAMP_ENABLE`` and ``DATASET_OFFRAMP_LABELS_ENABLE``, also writes
     ``train/offramp_*.jpg`` / ``test/offramp_*.jpg`` with ``take_offramp=1`` and κ from the Bézier.
-    Sample positions use arc-length spacing along the Bézier when ``DATASET_SAMPLE_UNIFORM_ALONG_ROAD`` is true.
-    When ``DATASET_OFFRAMP_MATCH_MAIN_SPACING`` is true, off-ramp clean counts are reduced (capped by
-    ``DATASET_OFFRAMP_*_FRAMES``) so average spacing along the ramp matches the main-road grid.
+    **Train** ramp crops: on each ramp, samples are uniform in arc length (or linear in ``u``) along the
+    portion inside the train BEV band, at the **same mean spacing** as main-road train rows; the total
+    is capped by ``DATASET_OFFRAMP_*_FRAMES`` when ``DATASET_OFFRAMP_MATCH_MAIN_SPACING`` is true.
 
     Args:
         num_train: Number of clean road samples (and of aligned perturbed mates if perturbing).
@@ -513,16 +514,16 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES, num_test=cfg.NUM_TEST_FRAMES):
     ):
         n_or = int(n_offramp_train)
         n_br = max(1, dw.offramp_num())
-        u_by_rid: list[np.ndarray] = []
-        for rid in range(n_br):
-            u_by_rid.append(
-                dw.offramp_u_samples_uniform_arc_length(n_or, ramp_id=rid)
-                if cfg.DATASET_SAMPLE_UNIFORM_ALONG_ROAD
-                else np.linspace(0.05, 0.95, n_or, dtype=np.float64)
-            )
-        for i in range(n_or):
-            rid = i % n_br
-            u = float(u_by_rid[rid][i])
+        or_pairs = offramp_train_u_rid_pairs_main_spacing(
+            dw,
+            size,
+            margin,
+            n_br,
+            int(num_train),
+            n_or,
+            uniform_along_ramp=cfg.DATASET_SAMPLE_UNIFORM_ALONG_ROAD,
+        )
+        for i, (u, rid) in enumerate(or_pairs):
             ev = dw.offramp_bezier_evolution(u, rid)
             if ev is None:
                 continue
@@ -544,7 +545,6 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES, num_test=cfg.NUM_TEST_FRAMES):
             _draw_train_near_vehicle_row_debug_bgr(view)
             cv2.imwrite(out, view)
             records.append((rel_path, float(kappa), 0.0, 0.0, 1))
-
     # Test: same y grid shape as train (clean then aligned perturbed with matching indices).
     for i, yf in enumerate(test_y):
         road_x = dw.get_road_center(yf)
@@ -703,9 +703,19 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES, num_test=cfg.NUM_TEST_FRAMES):
                 f"test/frame_{2 * num_test - 1:04d}.jpg, same sigma as train)"
             )
         if cfg.OFFRAMP_ENABLE and cfg.DATASET_OFFRAMP_LABELS_ENABLE:
+            nor_tr = sum(
+                1
+                for p, _, _, _, t in records
+                if p.startswith("train/offramp") and int(t) == 1
+            )
+            nor_te = sum(
+                1
+                for p, _, _, _, t in records
+                if p.startswith("test/offramp") and int(t) == 1
+            )
             extra += (
                 f"; off-ramp rows (take_offramp=1): "
-                f"{int(n_offramp_train)} train, {int(n_offramp_test)} test"
+                f"{nor_tr} train, {nor_te} test"
             )
         print(
             f"Data split complete. ({n_train} train, {n_test} test, labels in {labels_path!r}; "

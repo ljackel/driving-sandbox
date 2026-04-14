@@ -429,6 +429,24 @@ class DrivingWorld:
     def offramp_num(self) -> int:
         return len(self.offramp_branch_y_pxs())
 
+    def _offramp_bezier_scalar_params_at(
+        self, y_branch: float
+    ) -> tuple[float, float, float]:
+        """``(tangent_ctrl_px, end_dx_px, end_dy_px)`` for branch row ``y_branch`` (defaults + optional override)."""
+        L = float(cfg.OFFRAMP_TANGENT_CTRL_PX)
+        edx = float(cfg.OFFRAMP_END_DX_PX)
+        edy = float(cfg.OFFRAMP_END_DY_PX)
+        y0 = float(np.clip(float(y_branch), 1.0, float(self.size) - 1.0))
+        ovr = getattr(cfg, "OFFRAMP_BRANCH_BEZIER_OVERRIDE_BY_Y_PX", None)
+        if ovr:
+            for yk, triple in ovr.items():
+                if abs(float(yk) - y0) <= 0.51:
+                    L = float(triple[0])
+                    edx = float(triple[1])
+                    edy = float(triple[2])
+                    break
+        return L, edx, edy
+
     def _offramp_bezier_controls_at(
         self, y_branch: float
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
@@ -444,12 +462,9 @@ class DrivingWorld:
             t = np.array([0.0, -1.0], dtype=np.float64)
         else:
             t /= t_norm
-        L = float(cfg.OFFRAMP_TANGENT_CTRL_PX)
+        L, edx, edy = self._offramp_bezier_scalar_params_at(y0)
         p1 = p0 + L * t
-        p2 = p0 + np.array(
-            [float(cfg.OFFRAMP_END_DX_PX), float(cfg.OFFRAMP_END_DY_PX)],
-            dtype=np.float64,
-        )
+        p2 = p0 + np.array([edx, edy], dtype=np.float64)
         return p0, p1, p2
 
     def _offramp_bezier_controls(self) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
