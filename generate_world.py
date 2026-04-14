@@ -1,9 +1,12 @@
+from __future__ import annotations
+
 import numpy as np
 import cv2
 import matplotlib.pyplot as plt
 from scipy.interpolate import CubicSpline
 
 import config as cfg
+from perspective_camera import bev_point_to_camera_uv, perspective_camera_homography
 
 
 def _as_roadkill_y_tuple(v: object) -> tuple[float, ...]:
@@ -83,11 +86,99 @@ def roadkill_left_lane_blend_weight(y_row: float) -> float:
     return w
 
 
+def roadkill_splat_center_bev_xy(dw: DrivingWorld, y_obs: float) -> tuple[float, float]:
+    """Right-lane splat reference point in BEV px (matches drawing / ``DATASET_RIGHT_LANE_LATERAL_FRAC``)."""
+    y0 = float(y_obs)
+    xc = float(dw.cs(y0))
+    dxdY = float(dw.cs(y0, nu=1))
+    norm = float(np.hypot(dxdY, 1.0))
+    if norm < 1e-9:
+        return xc, y0
+    fx, fy = -dxdY / norm, -1.0 / norm
+    rx, ry = -fy, fx
+    lane_off = float(
+        cfg.LANE_WIDTH_METERS * cfg.DATASET_RIGHT_LANE_LATERAL_FRAC * dw.px_per_m
+    )
+    return float(xc + rx * lane_off), float(y0 + ry * lane_off)
+
+
+def _camera_uv_visible(
+    u: float,
+    v: float,
+    cam_s: float,
+    bottom_half_only: bool,
+) -> bool:
+    if u < 0.0 or u >= cam_s or v < 0.0 or v >= cam_s:
+        return False
+    if bottom_half_only and v < 0.5 * cam_s:
+        return False
+    return True
+
+
+def _roadkill_blend_weight_visible_gated(
+    y_row: float,
+    world_bgr: np.ndarray,
+    dw: DrivingWorld,
+    x_center: float,
+    psi: float,
+    right_lane_offset_px: float,
+    *,
+    for_training_labels: bool,
+) -> float:
+    """
+    Like ``roadkill_left_lane_blend_weight*`` but ramps apply only when the splat is visible from a
+    **right-lane** camera pose (``near_c = center + right * right_lane_offset_px``). Core band still uses full ``w``.
+    """
+    rows = (
+        _roadkill_obstacle_y_rows_training()
+        if for_training_labels
+        else _roadkill_obstacle_y_rows_all()
+    )
+    fx = float(np.cos(psi))
+    fy = float(np.sin(psi))
+    rx = float(-np.sin(psi))
+    ry = float(np.cos(psi))
+    f = np.array([fx, fy], dtype=np.float32)
+    rvec = np.array([rx, ry], dtype=np.float32)
+    near_c = np.array([float(x_center), float(y_row)], dtype=np.float32) + rvec * float(
+        right_lane_offset_px
+    )
+    M = perspective_camera_homography(world_bgr, near_c, f, rvec)
+    if M is None:
+        return (
+            roadkill_left_lane_blend_weight_training(y_row)
+            if for_training_labels
+            else roadkill_left_lane_blend_weight(y_row)
+        )
+
+    cam_s = float(cfg.CAMERA_IMAGE_SIZE)
+    bh = bool(cfg.PERSPECTIVE_INPUT_BOTTOM_HALF_ONLY)
+    y_rf = float(y_row)
+    w_max = 0.0
+    for y_obs in rows:
+        wi = _roadkill_left_lane_blend_weight_at_row(y_row, y_obs)
+        hc = float(cfg.ROADKILL_DETOUR_CORE_HALF_PX)
+        y0 = float(y_obs)
+        c_lo = y0 - hc
+        c_hi = y0 + hc
+        in_core = c_lo <= y_rf <= c_hi
+        ox, oy = roadkill_splat_center_bev_xy(dw, y_obs)
+        uv = bev_point_to_camera_uv(M, ox, oy)
+        vis = uv is not None and _camera_uv_visible(uv[0], uv[1], cam_s, bh)
+        wi_eff = wi if (in_core or vis) else 0.0
+        w_max = max(w_max, wi_eff)
+    return w_max
+
+
 def lateral_offset_px_avoid_roadkill(
     y_row: float,
     right_lane_center_offset_px: float,
     *,
     for_training_labels: bool = False,
+    world_bgr: np.ndarray | None = None,
+    dw: DrivingWorld | None = None,
+    x_center: float | None = None,
+    psi: float | None = None,
 ) -> float:
     """
     Signed lateral offset (px) along driver's right: nominal right-lane center, or mirrored left-lane
@@ -95,12 +186,35 @@ def lateral_offset_px_avoid_roadkill(
 
     If ``for_training_labels`` is true (``generate_dataset`` main road), only obstacles in
     ``ROADKILL_OBSTACLE_Y_PX`` contribute. If false (default, ``simulate``), eval-only rows are included too.
+
+    When ``ROADKILL_DETOUR_ONLY_WHEN_VISIBLE`` and ``world_bgr``, ``dw``, ``x_center``, ``psi`` are set,
+    merge ramps require the splat to project into the camera image (and into the bottom half if
+    ``PERSPECTIVE_INPUT_BOTTOM_HALF_ONLY``), evaluated from a right-lane vantage at ``right_lane_center_offset_px``.
     """
-    if for_training_labels:
+    r = float(right_lane_center_offset_px)
+    if not cfg.ROADKILL_ENABLE:
+        return r
+    use_vis = bool(getattr(cfg, "ROADKILL_DETOUR_ONLY_WHEN_VISIBLE", True))
+    if (
+        use_vis
+        and world_bgr is not None
+        and dw is not None
+        and x_center is not None
+        and psi is not None
+    ):
+        w = _roadkill_blend_weight_visible_gated(
+            float(y_row),
+            world_bgr,
+            dw,
+            float(x_center),
+            float(psi),
+            r,
+            for_training_labels=for_training_labels,
+        )
+    elif for_training_labels:
         w = roadkill_left_lane_blend_weight_training(y_row)
     else:
         w = roadkill_left_lane_blend_weight(y_row)
-    r = float(right_lane_center_offset_px)
     return (1.0 - w) * r + w * (-r)
 
 

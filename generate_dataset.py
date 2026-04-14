@@ -26,6 +26,12 @@ from dataset_split import (
 from generate_world import DrivingWorld, lateral_offset_px_avoid_roadkill
 
 
+def _psi_from_dxdY(dxdY: float) -> float:
+    """Road tangent (rad) matching ``simulate.initial_heading_road_aligned`` for graph ``x(y)``."""
+    norm = float(np.hypot(float(dxdY), 1.0))
+    return float(np.arctan2(-1.0 / norm, -float(dxdY) / norm))
+
+
 def signed_path_curvature(cs, y: float) -> float:
     """
     Signed curvature κ of the centerline treated as ``x(y)`` in bird's-eye pixel coordinates.
@@ -389,8 +395,15 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES, num_test=cfg.NUM_TEST_FRAMES):
     for i, yf in enumerate(train_y):
         road_x = dw.get_road_center(yf)
         dxdY = float(dw.cs(yf, nu=1))
+        psi_road = _psi_from_dxdY(dxdY)
         lat_px = lateral_offset_px_avoid_roadkill(
-            float(yf), right_lane_offset_px, for_training_labels=True
+            float(yf),
+            right_lane_offset_px,
+            for_training_labels=True,
+            world_bgr=world,
+            dw=dw,
+            x_center=float(road_x),
+            psi=psi_road,
         )
         view = get_perspective_view(
             world,
@@ -418,6 +431,7 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES, num_test=cfg.NUM_TEST_FRAMES):
         for j, yf in enumerate(train_y):
             road_x = dw.get_road_center(yf)
             dxdY = float(dw.cs(yf, nu=1))
+            psi_road = _psi_from_dxdY(dxdY)
             idx = num_train + j
             view, lat_m, yaw_rad = _sample_perturbed_perspective_view(
                 world,
@@ -425,7 +439,13 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES, num_test=cfg.NUM_TEST_FRAMES):
                 road_x,
                 dxdY,
                 lateral_offset_px_avoid_roadkill(
-                    float(yf), right_lane_offset_px, for_training_labels=True
+                    float(yf),
+                    right_lane_offset_px,
+                    for_training_labels=True,
+                    world_bgr=world,
+                    dw=dw,
+                    x_center=float(road_x),
+                    psi=psi_road,
                 ),
                 dw.px_per_m,
                 rng,
@@ -452,6 +472,7 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES, num_test=cfg.NUM_TEST_FRAMES):
                 yf = float(rng.choice(train_y))
                 road_x = dw.get_road_center(yf)
                 dxdY = float(dw.cs(yf, nu=1))
+                psi_road = _psi_from_dxdY(dxdY)
                 idx = base_idx + k
                 view, lat_m, yaw_rad = _sample_perturbed_perspective_view(
                     world,
@@ -459,8 +480,14 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES, num_test=cfg.NUM_TEST_FRAMES):
                     road_x,
                     dxdY,
                     lateral_offset_px_avoid_roadkill(
-                    float(yf), right_lane_offset_px, for_training_labels=True
-                ),
+                        float(yf),
+                        right_lane_offset_px,
+                        for_training_labels=True,
+                        world_bgr=world,
+                        dw=dw,
+                        x_center=float(road_x),
+                        psi=psi_road,
+                    ),
                     dw.px_per_m,
                     rng,
                     cfg.PERTURB_LATERAL_STD_M,
@@ -517,8 +544,15 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES, num_test=cfg.NUM_TEST_FRAMES):
     for i, yf in enumerate(test_y):
         road_x = dw.get_road_center(yf)
         dxdY = float(dw.cs(yf, nu=1))
+        psi_road = _psi_from_dxdY(dxdY)
         lat_px = lateral_offset_px_avoid_roadkill(
-            float(yf), right_lane_offset_px, for_training_labels=True
+            float(yf),
+            right_lane_offset_px,
+            for_training_labels=True,
+            world_bgr=world,
+            dw=dw,
+            x_center=float(road_x),
+            psi=psi_road,
         )
         view = get_perspective_view(
             world,
@@ -545,6 +579,7 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES, num_test=cfg.NUM_TEST_FRAMES):
         for j, yf in enumerate(test_y):
             road_x = dw.get_road_center(yf)
             dxdY = float(dw.cs(yf, nu=1))
+            psi_road = _psi_from_dxdY(dxdY)
             idx = int(num_test) + j
             view, lat_m, yaw_rad = _sample_perturbed_perspective_view(
                 world,
@@ -552,7 +587,13 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES, num_test=cfg.NUM_TEST_FRAMES):
                 road_x,
                 dxdY,
                 lateral_offset_px_avoid_roadkill(
-                    float(yf), right_lane_offset_px, for_training_labels=True
+                    float(yf),
+                    right_lane_offset_px,
+                    for_training_labels=True,
+                    world_bgr=world,
+                    dw=dw,
+                    x_center=float(road_x),
+                    psi=psi_road,
                 ),
                 dw.px_per_m,
                 rng_test,

@@ -128,6 +128,9 @@ ROADKILL_DETOUR_BLEND_PX = 55.0
 ROADKILL_APPROACH_LEAD_S = 1.0
 # Blend ramp on the **exit** side (smaller ``y``, after the obstacle): shorter → back to right lane quickly.
 ROADKILL_DETOUR_BLEND_EXIT_PX = 14.0
+# If true, lateral detour applies only when a splat projects into the ego camera FOV (right-lane vantage,
+# same homography as ``perspective_camera_view``); core band over the obstacle still forces full detour.
+ROADKILL_DETOUR_ONLY_WHEN_VISIBLE = True
 # Ellipse half-axes (px) for splat art; ``generate_world`` clamps so the across-road size stays inside
 # one lane (see ``ROADKILL_ACROSS_MAX_FRAC_OF_LANE``).
 ROADKILL_ALONG_ROAD_HALF_PX = 14.0
