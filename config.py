@@ -32,12 +32,24 @@ LABELS_TMP = "labels.partial.tmp"
 # --- Bird's-eye world (generate_world.py) ---
 WORLD_IMAGE_SIZE = 1024
 WORLD_METERS = 500.0
-SPLINE_NUM_CONTROL_POINTS = 6
+SPLINE_NUM_CONTROL_POINTS = 11
 # X offsets from map center for spline control points, bottom → top along the road.
 # Length must match SPLINE_NUM_CONTROL_POINTS. Order: bottom (large y) → top (small y).
-# S-curve strength: x offsets (px from map center), bottom → top; first value 0 = straight start.
+# More points + alternating Δ → about twice as many bends as the old 6-point S-curve (stay ~±260 px).
 # CubicSpline: dx/dy=0 at bottom (large y). Larger |Δ| = curvier road (stay within ~±260 px of center).
-SPLINE_X_DELTAS_BOTTOM_TO_TOP = (0, 116, -104, 84, -76, 0)
+SPLINE_X_DELTAS_BOTTOM_TO_TOP = (
+    0,
+    108,
+    -48,
+    104,
+    -52,
+    100,
+    -56,
+    96,
+    -52,
+    82,
+    0,
+)
 ROAD_POLYLINE_SAMPLES = 2000
 LANE_WIDTH_METERS = 4.0
 DASH_LENGTH_METERS = 3.0
@@ -176,7 +188,7 @@ BATCH_SIZE = 16
 # Adam: ``1e-3`` often stalls near predicting mean steering; ``3e-4`` (or ``1e-4``) fits this task reliably.
 LEARNING_RATE = 3e-4
 # Increase when the dataset grows; ``CHECKPOINT_MIN_EPOCH`` delays best-metric checkpoints.
-EPOCHS = 200
+EPOCHS = 100
 # Used by ``reproducibility.set_global_seed`` and train ``DataLoader`` shuffle generator.
 TRAIN_SEED = 42
 # First 1..(N-1) epochs are warmup: no best-metric tracking, checkpoints, or best-loss coloring.
@@ -198,7 +210,8 @@ def _compute_sim_yaw_rate_gain() -> float:
     """
     import numpy as np
 
-    from generate_dataset import dataset_train_test_y, signed_path_curvature
+    from dataset_split import dataset_train_test_y
+    from generate_dataset import signed_path_curvature
     from generate_world import DrivingWorld
 
     dw = DrivingWorld()

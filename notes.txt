@@ -15,5 +15,7 @@ made road more curvy. loss are smaller - this is a surprise. still drives well
 now double curviness again. still good.
 
 
- with both FC layers (1,000,000 weights) and a transformer, 22 examples + 22 perturbations are required to stay on the road,  but the transformer (300K parameters) trains much faster.
+ with both FC layers (1,000,000 weights) and a transformer, 22 examples + 22 perturbations are required to stay on the road,  but the transformer (300K parameters) trains much faster.  with these few examples it does not do a good jib of staying in lane.  with 100 real + 100 perturb it stays nicely in the lane.  for these experiments training and test data were sampled  along the  entire road.
+
+drives well even when train data is only on the lower half of the map/
 

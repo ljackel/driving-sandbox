@@ -11,7 +11,8 @@ set in ``config`` (from ``kappa_max * SIM_SPEED_M_S * px_per_m`` on the train/te
 units line up with scaled-curvature labels. There is no separate tracking controller—small prediction
 errors compound (classic BC / "open loop" in the ML sense).
 
-**Visualization:** The red BEV overlay traces the right-lane camera path. With ``SIM_FP_VIDEO_ENABLE``,
+**Visualization:** The red BEV overlay traces the right-lane camera path; **yellow bars** mark
+clean training sample locations (same ``y`` grid and lateral offset as ``generate_dataset``). With ``SIM_FP_VIDEO_ENABLE``,
 each driver crop is written to ``sim_first_person.mp4`` (same preprocessing as the model when
 ``PERSPECTIVE_INPUT_BOTTOM_HALF_ONLY`` is true: bottom half of the warp, resized to ``CAMERA_IMAGE_SIZE``).
 
@@ -30,6 +31,7 @@ import torch
 
 import config as cfg
 from data_loader import count_train_test_examples, train_perturb_stats_from_labels
+from dataset_split import dataset_train_test_y
 from perspective_camera import perspective_camera_view
 from reproducibility import set_global_seed
 
@@ -227,6 +229,31 @@ def _ego_lateral_offset_px(dw: DrivingWorld) -> float:
     return float(cfg.SIM_EGO_LATERAL_OFFSET_M) * float(dw.px_per_m)
 
 
+def _draw_train_sampling_bars_on_bev(
+    vis: np.ndarray,
+    dw: DrivingWorld,
+    train_y: np.ndarray,
+    lateral_offset_px: float,
+) -> None:
+    """
+    Draw yellow bars at clean training sample locations on the BEV (right-lane ego, same as dataset).
+    """
+    bar_half = max(8.0, 0.35 * float(cfg.LANE_WIDTH_METERS * dw.px_per_m))
+    yellow_bgr = (0, 255, 255)
+    for yf in train_y:
+        yf = float(yf)
+        xc = float(dw.get_road_center(yf))
+        psi = initial_heading_road_aligned(dw.cs, yf)
+        qx, qy = _right_lane_overlay_xy(xc, yf, psi, lateral_offset_px)
+        rx = float(-np.sin(psi))
+        ry = float(np.cos(psi))
+        x1 = int(round(qx - bar_half * rx))
+        y1 = int(round(qy - bar_half * ry))
+        x2 = int(round(qx + bar_half * rx))
+        y2 = int(round(qy + bar_half * ry))
+        cv2.line(vis, (x1, y1), (x2, y2), yellow_bgr, 1, cv2.LINE_AA)
+
+
 def _right_lane_overlay_xy(
     x: float,
     y: float,
@@ -400,6 +427,16 @@ def main() -> None:
 
     lateral_px = float(cfg.SIM_EGO_LATERAL_OFFSET_M) * px_per_m
     vis = world_bgr.copy()
+    dw_overlay = DrivingWorld()
+    train_y_rows, _ = dataset_train_test_y(
+        int(cfg.NUM_TRAIN_FRAMES),
+        int(cfg.NUM_TEST_FRAMES),
+        dw_overlay.size,
+        cfg.DATASET_MAP_MARGIN,
+        mix_train_test_geography=cfg.DATASET_MIX_TRAIN_TEST_GEOGRAPHY,
+        seed=cfg.DATASET_SEED,
+    )
+    _draw_train_sampling_bars_on_bev(vis, dw_overlay, train_y_rows, lateral_px)
     for i in range(len(path) - 1):
         x0, y0, p0 = path[i]
         x1, y1, p1 = path[i + 1]
