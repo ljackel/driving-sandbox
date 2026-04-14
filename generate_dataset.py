@@ -323,6 +323,8 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES, num_test=cfg.NUM_TEST_FRAMES):
         margin,
         mix_train_test_geography=cfg.DATASET_MIX_TRAIN_TEST_GEOGRAPHY,
         seed=cfg.DATASET_SEED,
+        uniform_along_road=cfg.DATASET_SAMPLE_UNIFORM_ALONG_ROAD,
+        road_cs=dw.cs,
     )
 
     # Right-lane center, heading = road tangent (no lateral/yaw noise unless perturbation σ > 0).

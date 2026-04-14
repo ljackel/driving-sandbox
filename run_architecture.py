@@ -35,7 +35,7 @@ def driving_net_parameter_rows(model: DrivingNet) -> tuple[list[tuple[str, int]]
         rows = [
             ("backbone (2× Conv2d + ReLU)", sum(p.numel() for p in model.backbone.parameters())),
             (
-                f"MLP (Flatten + 2×{cfg.MODEL_FC_HIDDEN_DIM} + out)",
+                "MLP (Flatten + Linear → out)",
                 sum(p.numel() for p in model.mlp_head.parameters()),
             ),
         ]
@@ -51,7 +51,6 @@ def _mermaid_block(model: DrivingNet) -> str:
     out = cfg.MODEL_OUTPUT_DIM
     if not model.use_transformer:
         fh = cfg.MODEL_FLATTEN_DIM
-        hd = cfg.MODEL_FC_HIDDEN_DIM
         return f"""flowchart TB
   IN["Input: (N, 3, {h}, {h})"]
   subgraph CNN["CNN backbone"]
@@ -59,10 +58,8 @@ def _mermaid_block(model: DrivingNet) -> str:
     C2["Conv2d {c1}→{c2}, k={k}, s={s} + ReLU"]
   end
   FL["Flatten → {fh}"]
-  M1["Linear {fh}→{hd} + ReLU"]
-  M2["Linear {hd}→{hd} + ReLU"]
-  OUT["Linear {hd}→{out} (steering = [:,0])"]
-  IN --> C1 --> C2 --> FL --> M1 --> M2 --> OUT
+  OUT["Linear {fh}→{out} (steering = [:,0])"]
+  IN --> C1 --> C2 --> FL --> OUT
 """
     p = model.token_grid
     t = model.num_tokens
@@ -147,7 +144,7 @@ def write_architecture_artifacts(run_dir: str, model: nn.Module) -> None:
     md_path = os.path.join(run_dir, "architecture.md")
     png_path = os.path.join(run_dir, "architecture.png")
 
-    head_name = "Transformer head" if model.use_transformer else "MLP head (2 FC hidden)"
+    head_name = "Transformer head" if model.use_transformer else "Linear readout (no FC hidden)"
     lines: list[str] = [
         "# DrivingNet architecture",
         "",

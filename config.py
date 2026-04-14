@@ -5,14 +5,15 @@ Summary:
 
 - **World:** S-curve from ``SPLINE_X_DELTAS_BOTTOM_TO_TOP`` (``generate_world``).
 - **Dataset:** By default train = bottom BEV half, test = top half. If ``DATASET_MIX_TRAIN_TEST_GEOGRAPHY`` is
-  true, both splits sample the full road via shuffle-split (``DATASET_SEED``). Perturbed duplicate frames:
+  true, both splits sample the full road via shuffle-split (``DATASET_SEED``). ``DATASET_SAMPLE_UNIFORM_ALONG_ROAD``
+  chooses equal spacing along the road vs equal spacing in image ``y``. Perturbed duplicate frames:
   ``DATASET_PERTURBATIONS_ENABLE`` plus ``PERTURB_*``. ``NUM_TRAIN_FRAMES`` / ``NUM_TEST_FRAMES`` are clean-grid
   counts; ``TOTAL_TRAIN_FRAMES`` / ``TOTAL_TEST_FRAMES`` are full split sizes after generation.
 - **Model input:** ``PERSPECTIVE_INPUT_BOTTOM_HALF_ONLY`` uses only the bottom half of each perspective
   crop (near-ego pixels), resized to ``CAMERA_IMAGE_SIZE``; otherwise the full crop is used.
 - **Labels:** Steering is ``kappa / max|kappa|`` over all CSV rows (``generate_dataset``). Lateral/yaw
   recentering applies to perturbed rows when ``DATASET_PERTURBATIONS_ENABLE`` is true and ``PERTURB_*`` σ > 0.
-- **Training:** MSE on ``DrivingNet`` channel 0 only (CNN + transformer or 2-layer MLP head); see ``MODEL_USE_TRANSFORMER_HEAD``, ``LEARNING_RATE``, ``EPOCHS``.
+- **Training:** MSE on ``DrivingNet`` channel 0 only (CNN + transformer or linear readout); see ``MODEL_USE_TRANSFORMER_HEAD``, ``LEARNING_RATE``, ``EPOCHS``.
 - **Simulation:** ``SIM_YAW_RATE_GAIN`` from ``_compute_sim_yaw_rate_gain`` aligns ``psi += steering * gain * dt``
   with curvature step semantics on the train/test ``y`` grid. Optional first-person MP4: ``SIM_FP_VIDEO_*``.
 """
@@ -28,6 +29,21 @@ CHECKPOINT_FILENAME = "driving_net.pt"
 LABELS_CSV = "labels.csv"
 LABELS_CSV_ALT = "labels_new.csv"
 LABELS_TMP = "labels.partial.tmp"
+
+# --- Switches (feature toggles; adjust these first) ---
+# Perspective: use only bottom half of warp before resize (train / eval / sim).
+PERSPECTIVE_INPUT_BOTTOM_HALF_ONLY = False
+# Dataset: false = train bottom BEV half, test top half; true = shuffle-split full road for both.
+DATASET_MIX_TRAIN_TEST_GEOGRAPHY = False
+# Dataset: if true, clean sample positions are uniform in **arc length** along the centerline; if false, uniform in ``y``.
+DATASET_SAMPLE_UNIFORM_ALONG_ROAD = True
+# Dataset: add aligned perturbed train/test frames when a perturb σ > 0 (see PERTURB_* below).
+DATASET_PERTURBATIONS_ENABLE = True
+# Model: true = Transformer head; false = Flatten + linear to MODEL_OUTPUT_DIM.
+MODEL_USE_TRANSFORMER_HEAD = True
+# Simulation: write first-person MP4 during roll-out.
+SIM_FP_VIDEO_ENABLE = True
+# ``DATASET_ALIGNED_PERTURB`` is computed later (depends on ``DATASET_PERTURBATIONS_ENABLE`` and ``PERTURB_*`` σ).
 
 # --- Bird's-eye world (generate_world.py) ---
 WORLD_IMAGE_SIZE = 1024
@@ -88,17 +104,9 @@ PERSPECTIVE_NEAR_HALF_WIDTH = 14.0
 # Near the map edge, a small heading change can spill ~1px past the border; without this,
 # open-loop sim often stops after one step. Warp uses replicate padding for out-of-map samples.
 PERSPECTIVE_SRC_MARGIN_PX = 12.0
-# If true: for ``train`` / ``evaluate_test`` / ``simulate``, crop each perspective image to its
-# bottom half (nearest the vehicle), then resize to ``CAMERA_IMAGE_SIZE``. If false: use the full square.
-PERSPECTIVE_INPUT_BOTTOM_HALF_ONLY = False
 
 # --- Dataset generation ---
-# BEV ``y`` increases downward. ``DATASET_MIX_TRAIN_TEST_GEOGRAPHY``: if false, train uses only the
-# bottom half (large ``y``) and test only the top half (small ``y``), disjoint at the midline. If true,
-# ``NUM_TRAIN_FRAMES + NUM_TEST_FRAMES`` positions are equally spaced along the full span
-# ``[margin, size - margin]`` and split at random (``DATASET_SEED``), so both train and test mix
-# top and bottom road geometry. Perturbed duplicate frames: ``DATASET_PERTURBATIONS_ENABLE`` plus ``PERTURB_*``.
-DATASET_MIX_TRAIN_TEST_GEOGRAPHY = False
+# BEV ``y`` increases downward; geography split vs mix is ``DATASET_MIX_TRAIN_TEST_GEOGRAPHY`` (switches above).
 DATASET_MAP_MARGIN = 80
 # Clean grid size per split; with aligned perturbations on, total files = 2 × this (half clean, half perturbed).
 NUM_TRAIN_FRAMES = 100
@@ -106,10 +114,8 @@ NUM_TEST_FRAMES = 100
 # Camera lateral (m) = LANE_WIDTH_METERS × fraction: from spline (lane divider) along driver's-right
 # toward the outer edge. 0.5 = geometric center of the right lane; lower if the view hugs the outer edge.
 DATASET_RIGHT_LANE_LATERAL_FRAC = 0.45
-# If false: only clean train/test frames (``PERTURB_*`` ignored for generation). If true: extra aligned
-# perturbed train/test frames when at least one of ``PERTURB_LATERAL_STD_M`` / ``PERTURB_YAW_STD_DEG`` > 0.
-DATASET_PERTURBATIONS_ENABLE = True
 # Gaussian lateral (m) and yaw (deg) for perturbed views; BEV uses ``WORLD_IMAGE_SIZE / WORLD_METERS`` px/m.
+# Aligned perturb duplicates require ``DATASET_PERTURBATIONS_ENABLE`` (switches above) and σ > 0 here.
 PERTURB_LATERAL_STD_M = 2.2
 PERTURB_YAW_STD_DEG = 0.0
 # Steering recentering on perturbed rows: −GAIN_LAT·lat_m − GAIN_YAW·yaw_rad (after κ scaling).
@@ -169,9 +175,6 @@ MODEL_CONV2_CHANNELS = 36
 MODEL_KERNEL_SIZE = 5
 MODEL_STRIDE = 2
 MODEL_NUM_CONV_BLOCKS = 2
-# If true: pooled spatial tokens + TransformerEncoder + linear head. If false: ``Flatten`` + two
-# hidden Linear layers (``MODEL_FC_HIDDEN_DIM``) + output Linear (legacy stack).
-MODEL_USE_TRANSFORMER_HEAD = False
 
 
 def _spatial_after_convs(
@@ -191,8 +194,6 @@ _MODEL_SPATIAL = _spatial_after_convs(
     CAMERA_IMAGE_SIZE, MODEL_NUM_CONV_BLOCKS, MODEL_KERNEL_SIZE, MODEL_STRIDE
 )
 MODEL_FLATTEN_DIM = MODEL_CONV2_CHANNELS * _MODEL_SPATIAL * _MODEL_SPATIAL
-# Hidden width for both fully connected layers when ``MODEL_USE_TRANSFORMER_HEAD`` is false.
-MODEL_FC_HIDDEN_DIM = 1000
 # CNN → ``AdaptiveAvgPool2d`` to this side length → ``token_grid²`` sequence tokens for the transformer head.
 MODEL_TRANSFORMER_TOKEN_GRID = 7
 MODEL_TRANSFORMER_D_MODEL = 128
@@ -244,6 +245,8 @@ def _compute_sim_yaw_rate_gain() -> float:
         margin,
         mix_train_test_geography=DATASET_MIX_TRAIN_TEST_GEOGRAPHY,
         seed=DATASET_SEED,
+        uniform_along_road=DATASET_SAMPLE_UNIFORM_ALONG_ROAD,
+        road_cs=dw.cs,
     )
     kmax = 0.0
     for yf in np.concatenate((train_y, test_y)):
@@ -266,8 +269,7 @@ SIM_MAX_STEPS = 200_000
 SIM_EGO_LATERAL_OFFSET_M = LANE_WIDTH_METERS * DATASET_RIGHT_LANE_LATERAL_FRAC
 # Start as low as possible: try y = h-1, then move up until perspective warp fits.
 SIM_START_MAX_INSET_PX = 200
-# First-person video from ``simulate.run_simulation`` (same resolution as ``CAMERA_IMAGE_SIZE``).
-SIM_FP_VIDEO_ENABLE = True
+# First-person video from ``simulate.run_simulation`` (same resolution as ``CAMERA_IMAGE_SIZE``); gated by ``SIM_FP_VIDEO_ENABLE`` (switches above).
 SIM_FP_VIDEO_FILENAME = "sim_first_person.mp4"
 # Playback speed matches one simulation step per frame (``1 / SIM_DT``).
 SIM_VIDEO_FPS = 1.0 / SIM_DT

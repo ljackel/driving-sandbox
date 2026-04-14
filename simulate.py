@@ -435,6 +435,8 @@ def main() -> None:
         cfg.DATASET_MAP_MARGIN,
         mix_train_test_geography=cfg.DATASET_MIX_TRAIN_TEST_GEOGRAPHY,
         seed=cfg.DATASET_SEED,
+        uniform_along_road=cfg.DATASET_SAMPLE_UNIFORM_ALONG_ROAD,
+        road_cs=dw_overlay.cs,
     )
     _draw_train_sampling_bars_on_bev(vis, dw_overlay, train_y_rows, lateral_px)
     for i in range(len(path) - 1):

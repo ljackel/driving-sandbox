@@ -6,8 +6,8 @@ import config as cfg
 
 class DrivingNet(nn.Module):
     """
-    CNN backbone, then either a **Transformer** encoder over spatial tokens or a **two-hidden-layer MLP**
-    (controlled by ``MODEL_USE_TRANSFORMER_HEAD``).
+    CNN backbone, then either a **Transformer** encoder over spatial tokens or a **linear readout**
+    on the flattened conv map (controlled by ``MODEL_USE_TRANSFORMER_HEAD``).
 
     **Steering** is **channel 0**; training and simulation use only that channel (channel 1 is unused).
     """
@@ -66,14 +66,9 @@ class DrivingNet(nn.Module):
             self.pos_embed = None
             self.encoder = None
             self.head = None
-            h = cfg.MODEL_FC_HIDDEN_DIM
             self.mlp_head = nn.Sequential(
                 nn.Flatten(),
-                nn.Linear(cfg.MODEL_FLATTEN_DIM, h),
-                nn.ReLU(),
-                nn.Linear(h, h),
-                nn.ReLU(),
-                nn.Linear(h, cfg.MODEL_OUTPUT_DIM),
+                nn.Linear(cfg.MODEL_FLATTEN_DIM, cfg.MODEL_OUTPUT_DIM),
             )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
