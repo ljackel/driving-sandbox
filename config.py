@@ -4,7 +4,9 @@ Central numerical (and related) hyperparameters for the driving sandbox.
 Summary:
 
 - **World:** S-curve from ``SPLINE_X_DELTAS_BOTTOM_TO_TOP`` (``generate_world``).
-- **Dataset:** By default train = bottom BEV half, test = top half. If ``DATASET_MIX_TRAIN_TEST_GEOGRAPHY`` is
+- **Dataset:** By default train = bottom BEV half, test = top half. Roadkill: ``ROADKILL_OBSTACLE_Y_PX`` defines
+  supervised detours; ``ROADKILL_EVAL_ONLY_OBSTACLE_Y_PX`` is drawn and used in sim only (generalization).
+  If ``DATASET_MIX_TRAIN_TEST_GEOGRAPHY`` is
   true, both splits sample the full road via shuffle-split (``DATASET_SEED``). ``DATASET_SAMPLE_UNIFORM_ALONG_ROAD``
   chooses equal spacing along the main road (and along the off-ramp Bézier) vs uniform ``y`` / ``u``. Perturbed duplicate frames:
   ``DATASET_PERTURBATIONS_ENABLE`` plus ``PERTURB_*``. ``NUM_TRAIN_FRAMES`` / ``NUM_TEST_FRAMES`` are clean-grid
@@ -72,11 +74,12 @@ SPLINE_NUM_CONTROL_POINTS = 11
 # Length must match SPLINE_NUM_CONTROL_POINTS. Order: bottom (large y) → top (small y).
 # More points + alternating Δ → about twice as many bends as the old 6-point S-curve (stay ~±260 px).
 # CubicSpline: dx/dy=0 at bottom (large y). Larger |Δ| = curvier road (stay within ~±260 px of center).
-# First bend (second and third knots from bottom) scaled to 0.25× amplitude vs the original S-curve.
+# First two non-center knots from the bottom are 0 so the **lower** part of the road stays straight;
+# curvature starts at the next control (``104``).
 SPLINE_X_DELTAS_BOTTOM_TO_TOP = (
     0,
-    27,
-    -12,
+    0,
+    0,
     104,
     -52,
     100,
@@ -108,10 +111,13 @@ DASH_GAP_METERS = 3.0
 WORLD_GREEN_BGR = (34, 139, 34)
 WORLD_ROAD_BGR = (40, 40, 40)
 ROAD_EDGE_THICKNESS = 1
-# Flattened "roadkill" obstacle in the **right** lane at a fixed BEV row; training/sim shift the ego
-# reference to the **left** lane with smooth merges (see ``roadkill_left_lane_blend_weight``).
+# Roadkill splat(s) in the **right** lane at BEV row(s) ``y`` (pixels, top=0; traffic → smaller ``y``).
+# **Training** (``generate_dataset`` lateral / crops): only ``ROADKILL_OBSTACLE_Y_PX`` — use a ``float`` or ``tuple``.
+# **Map + simulation** also draw ``ROADKILL_EVAL_ONLY_OBSTACLE_Y_PX`` and apply that detour in ``simulate`` only
+# (model never supervised on those rows; tests generalization).
 ROADKILL_ENABLE = True
-ROADKILL_OBSTACLE_Y_PX = 850.0
+ROADKILL_OBSTACLE_Y_PX = (850.0,)
+ROADKILL_EVAL_ONLY_OBSTACLE_Y_PX = (300.0,)
 # Half-height (px) of the band where the ego uses the left lane at full strength.
 ROADKILL_DETOUR_CORE_HALF_PX = 38.0
 # Blend ramp on the **approach** side (larger ``y``, before the obstacle): ego starts moving left over this
@@ -284,7 +290,7 @@ LEARNING_RATE = 3e-4
 # Used by ``reproducibility.set_global_seed`` and train ``DataLoader`` shuffle generator.
 TRAIN_SEED = 42
 # First 1..(N-1) epochs are warmup: no best-metric tracking, checkpoints, or best-loss coloring.
-CHECKPOINT_MIN_EPOCH = 11
+CHECKPOINT_MIN_EPOCH = 2
 NORMALIZE_MEAN = (0.5, 0.5, 0.5)
 NORMALIZE_STD = (0.5, 0.5, 0.5)
 

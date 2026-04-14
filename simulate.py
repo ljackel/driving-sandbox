@@ -5,7 +5,7 @@ Open-loop behavioral-cloning roll-out on the bird's-eye map.
 advances **arc length** along the spline (decreasing ``y``), so the logged path cannot chord off the road.
 ``psi`` still integrates from the network (``psi += steering * SIM_YAW_RATE_GAIN * SIM_DT``) for the
 BC state / CSV. The camera uses the spline tangent at ``y`` and lateral offset vs row (right lane, or
-left-lane detour when ``ROADKILL_ENABLE`` — same as ``generate_dataset`` / ``lateral_offset_px_avoid_roadkill``).
+left-lane detour when ``ROADKILL_ENABLE`` (includes ``ROADKILL_EVAL_ONLY_OBSTACLE_Y_PX``; training data uses only ``ROADKILL_OBSTACLE_Y_PX``).
 
 **Control:** The network predicts steering from the crop; ``train.py`` supervises **output channel 0``.
 With projection on, steering does **not** translate the centerline reference with ``cos/sin(psi)``—that

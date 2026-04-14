@@ -6,18 +6,34 @@ from scipy.interpolate import CubicSpline
 import config as cfg
 
 
-def roadkill_left_lane_blend_weight(y_row: float) -> float:
-    """
-    Smooth0..1 blend: 0 = right-lane lateral reference, 1 = left-lane (avoid obstacle).
+def _as_roadkill_y_tuple(v: object) -> tuple[float, ...]:
+    """Normalize a config roadkill-Y value (``float``, ``int``, or sequence)."""
+    if isinstance(v, (int, float)):
+        return (float(v),)
+    if v is None:
+        return ()
+    return tuple(float(y) for y in v)
 
-    Traffic advances toward **decreasing** ``y``. The obstacle sits near ``ROADKILL_OBSTACLE_Y_PX``.
-    Approach (larger ``y``): blend begins ``ROADKILL_APPROACH_LEAD_S`` s of travel before the south
-    edge of the core band (at ``SIM_SPEED_M_S``). Exit (smaller ``y``): shorter ramp via
-    ``ROADKILL_DETOUR_BLEND_EXIT_PX`` so the ego returns to the right lane as soon as it is clear.
+
+def _roadkill_obstacle_y_rows_training() -> tuple[float, ...]:
+    """Rows used for **dataset** lateral reference (labels / train crops)."""
+    return _as_roadkill_y_tuple(cfg.ROADKILL_OBSTACLE_Y_PX)
+
+
+def _roadkill_obstacle_y_rows_eval_only() -> tuple[float, ...]:
+    """Extra splat rows: on the map and in **sim** lateral only, not in training labels."""
+    return _as_roadkill_y_tuple(getattr(cfg, "ROADKILL_EVAL_ONLY_OBSTACLE_Y_PX", ()))
+
+
+def _roadkill_obstacle_y_rows_all() -> tuple[float, ...]:
+    """All drawn splats and full **sim** detour geometry."""
+    return _roadkill_obstacle_y_rows_training() + _roadkill_obstacle_y_rows_eval_only()
+
+
+def _roadkill_left_lane_blend_weight_at_row(y_row: float, y0: float) -> float:
     """
-    if not cfg.ROADKILL_ENABLE:
-        return 0.0
-    y0 = float(cfg.ROADKILL_OBSTACLE_Y_PX)
+    Blend 0..1 for a **single** obstacle centered at ``y0`` (same geometry as legacy one-obstacle case).
+    """
     hc = float(cfg.ROADKILL_DETOUR_CORE_HALF_PX)
     bl_in = float(cfg.ROADKILL_DETOUR_BLEND_PX)
     bl_out = float(cfg.ROADKILL_DETOUR_BLEND_EXIT_PX)
@@ -42,14 +58,48 @@ def roadkill_left_lane_blend_weight(y_row: float) -> float:
     return float(np.clip((y_row - e_lo) / span, 0.0, 1.0))
 
 
+def roadkill_left_lane_blend_weight_training(y_row: float) -> float:
+    """
+    Blend for **dataset** generation: ``ROADKILL_OBSTACLE_Y_PX`` only (supervised detours).
+    """
+    if not cfg.ROADKILL_ENABLE:
+        return 0.0
+    w = 0.0
+    for y0 in _roadkill_obstacle_y_rows_training():
+        w = max(w, _roadkill_left_lane_blend_weight_at_row(y_row, y0))
+    return w
+
+
+def roadkill_left_lane_blend_weight(y_row: float) -> float:
+    """
+    Blend for **simulation** (and any caller needing full map behavior): training rows plus
+    ``ROADKILL_EVAL_ONLY_OBSTACLE_Y_PX``. Uses **max** over all such rows.
+    """
+    if not cfg.ROADKILL_ENABLE:
+        return 0.0
+    w = 0.0
+    for y0 in _roadkill_obstacle_y_rows_all():
+        w = max(w, _roadkill_left_lane_blend_weight_at_row(y_row, y0))
+    return w
+
+
 def lateral_offset_px_avoid_roadkill(
-    y_row: float, right_lane_center_offset_px: float
+    y_row: float,
+    right_lane_center_offset_px: float,
+    *,
+    for_training_labels: bool = False,
 ) -> float:
     """
     Signed lateral offset (px) along driver's right: nominal right-lane center, or mirrored left-lane
     when passing the roadkill band (smooth ramps).
+
+    If ``for_training_labels`` is true (``generate_dataset`` main road), only obstacles in
+    ``ROADKILL_OBSTACLE_Y_PX`` contribute. If false (default, ``simulate``), eval-only rows are included too.
     """
-    w = roadkill_left_lane_blend_weight(y_row)
+    if for_training_labels:
+        w = roadkill_left_lane_blend_weight_training(y_row)
+    else:
+        w = roadkill_left_lane_blend_weight(y_row)
     r = float(right_lane_center_offset_px)
     return (1.0 - w) * r + w * (-r)
 
@@ -85,8 +135,8 @@ class DrivingWorld:
     """
     Top-down raster map: cubic-spline centerline from ``SPLINE_X_DELTAS_BOTTOM_TO_TOP``, two-lane road,
     dashed center marking, optional bottom-half off-ramp (``OFFRAMP_*``), optional right-lane roadkill
-    obstacle (``ROADKILL_*``). Curvature of the **main** spline drives dataset steering labels after
-    global scaling; lateral reference can shift to the left lane to pass the obstacle.
+    obstacle(s) (``ROADKILL_*``; map shows training + eval-only rows). Curvature of the **main** spline drives
+    dataset steering labels after global scaling; dataset lateral uses only ``ROADKILL_OBSTACLE_Y_PX``.
     """
 
     def __init__(
@@ -360,7 +410,7 @@ class DrivingWorld:
         off = self._offramp_centerline_points()
         if off is not None and len(off) >= 2:
             self._draw_road_polyline(world, off, lane_px=lane_px, dash_len=dash_len, dash_gap=dash_gap)
-        self._draw_roadkill_obstacle(world)
+        self._draw_roadkill_obstacles(world)
         # Orientation: top of image is y=0 (small y); blue stripe marks that edge for debugging.
         cv2.line(
             world,
@@ -371,12 +421,16 @@ class DrivingWorld:
         )
         return world
 
-    def _draw_roadkill_obstacle(self, world: np.ndarray) -> None:
-        """Flattened red splat in the right lane (pavement) at ``ROADKILL_OBSTACLE_Y_PX``."""
+    def _draw_roadkill_obstacles(self, world: np.ndarray) -> None:
+        """Flattened red splat(s) in the right lane at each ``ROADKILL_OBSTACLE_Y_PX`` row."""
         if not cfg.ROADKILL_ENABLE:
             return
+        for y_row in _roadkill_obstacle_y_rows_all():
+            self._draw_roadkill_obstacle_at(world, float(y_row))
+
+    def _draw_roadkill_obstacle_at(self, world: np.ndarray, y0: float) -> None:
+        """Single splat in the right lane (pavement) at BEV row ``y0``."""
         size = int(self.size)
-        y0 = float(cfg.ROADKILL_OBSTACLE_Y_PX)
         y0i = int(np.clip(int(round(y0)), 4, size - 5))
         xc = float(self.cs(float(y0)))
         dxdY = float(self.cs(float(y0), nu=1))

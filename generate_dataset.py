@@ -325,10 +325,10 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES, num_test=cfg.NUM_TEST_FRAMES):
     **Test filenames:** ``test/frame_{0..num_test-1}.jpg`` (clean), then
     ``test/frame_{num_test..2*num_test-1}.jpg`` (perturbed) under the same perturbation conditions.
 
-    **Roadkill:** when ``ROADKILL_ENABLE``, the map includes a right-lane obstacle near
-    ``ROADKILL_OBSTACLE_Y_PX``; main-road samples use a smooth left-lane lateral reference, begin merging
-    early (``ROADKILL_APPROACH_LEAD_S`` at ``SIM_SPEED_M_S``), and return to the right lane on a short
-    exit ramp (same as ``simulate`` / ``lateral_offset_px_avoid_roadkill``).
+    **Roadkill:** when ``ROADKILL_ENABLE``, the map may show extra splats in
+    ``ROADKILL_EVAL_ONLY_OBSTACLE_Y_PX``, but **main-road** crops and lateral reference for labels use only
+    ``ROADKILL_OBSTACLE_Y_PX`` (``lateral_offset_px_avoid_roadkill(..., for_training_labels=True)``).
+    ``simulate`` uses the full set (training + eval-only) for open-loop generalization tests.
 
     **Off-ramp:** when ``OFFRAMP_ENABLE`` and ``DATASET_OFFRAMP_LABELS_ENABLE``, also writes
     ``train/offramp_*.jpg`` / ``test/offramp_*.jpg`` with ``take_offramp=1`` and κ from the Bézier.
@@ -389,7 +389,9 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES, num_test=cfg.NUM_TEST_FRAMES):
     for i, yf in enumerate(train_y):
         road_x = dw.get_road_center(yf)
         dxdY = float(dw.cs(yf, nu=1))
-        lat_px = lateral_offset_px_avoid_roadkill(float(yf), right_lane_offset_px)
+        lat_px = lateral_offset_px_avoid_roadkill(
+            float(yf), right_lane_offset_px, for_training_labels=True
+        )
         view = get_perspective_view(
             world,
             yf,
@@ -422,7 +424,9 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES, num_test=cfg.NUM_TEST_FRAMES):
                 yf,
                 road_x,
                 dxdY,
-                lateral_offset_px_avoid_roadkill(float(yf), right_lane_offset_px),
+                lateral_offset_px_avoid_roadkill(
+                    float(yf), right_lane_offset_px, for_training_labels=True
+                ),
                 dw.px_per_m,
                 rng,
                 cfg.PERTURB_LATERAL_STD_M,
@@ -454,7 +458,9 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES, num_test=cfg.NUM_TEST_FRAMES):
                     yf,
                     road_x,
                     dxdY,
-                    lateral_offset_px_avoid_roadkill(float(yf), right_lane_offset_px),
+                    lateral_offset_px_avoid_roadkill(
+                    float(yf), right_lane_offset_px, for_training_labels=True
+                ),
                     dw.px_per_m,
                     rng,
                     cfg.PERTURB_LATERAL_STD_M,
@@ -511,7 +517,9 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES, num_test=cfg.NUM_TEST_FRAMES):
     for i, yf in enumerate(test_y):
         road_x = dw.get_road_center(yf)
         dxdY = float(dw.cs(yf, nu=1))
-        lat_px = lateral_offset_px_avoid_roadkill(float(yf), right_lane_offset_px)
+        lat_px = lateral_offset_px_avoid_roadkill(
+            float(yf), right_lane_offset_px, for_training_labels=True
+        )
         view = get_perspective_view(
             world,
             yf,
@@ -543,7 +551,9 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES, num_test=cfg.NUM_TEST_FRAMES):
                 yf,
                 road_x,
                 dxdY,
-                lateral_offset_px_avoid_roadkill(float(yf), right_lane_offset_px),
+                lateral_offset_px_avoid_roadkill(
+                    float(yf), right_lane_offset_px, for_training_labels=True
+                ),
                 dw.px_per_m,
                 rng_test,
                 cfg.PERTURB_LATERAL_STD_M,
