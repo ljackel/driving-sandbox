@@ -26,7 +26,9 @@ button on each window); **Resume** continues. Press ``q`` to stop, or **Ctrl+C**
 (focus may need to be on the terminal; live windows use short ``waitKey`` polls so Ctrl+C can interrupt).
 Windows are tiled
 left-to-right (BEV then driver) using ``SIM_REALTIME_WINDOW_*`` so they do not overlap.
-Use ``SIM_REALTIME_STEP_PAUSE_MS`` (and ``SIM_REALTIME_BEV_WAIT_MS``) to slow the live display.
+The BEV view draws a **speed bar** at the bottom (drag with the mouse; see ``SIM_REALTIME_SPEED_*`` in config)
+that scales distance per simulation step. Use ``SIM_REALTIME_STEP_PAUSE_MS`` (and ``SIM_REALTIME_BEV_WAIT_MS``)
+to slow the live display.
 
 **Input crop:** ``PERSPECTIVE_INPUT_BOTTOM_HALF_ONLY`` matches ``train.py`` / ``evaluate_test.py`` (bottom
 half of the warp, then resize to ``CAMERA_IMAGE_SIZE``).
@@ -341,6 +343,65 @@ def _draw_offramp_train_sampling_bars_on_bev(
         _draw_lateral_sampling_bar(vis, qx, qy, psi, bar_half, orange_bgr)
 
 
+def _rt_speed_scale_from_trackbar_pos(pos: int) -> float:
+    c = float(cfg.SIM_REALTIME_SPEED_TRACKBAR_CENTER)
+    lo = float(cfg.SIM_REALTIME_SPEED_SCALE_MIN)
+    hi = float(cfg.SIM_REALTIME_SPEED_SCALE_MAX)
+    return float(np.clip(float(pos) / c, lo, hi))
+
+
+def _rt_speed_slider_set_from_mx(ui: dict, mx: int, sx0: int, sx1: int) -> None:
+    denom = float(max(1, sx1 - sx0))
+    t = (float(mx) - float(sx0)) / denom
+    t = float(np.clip(t, 0.0, 1.0))
+    tmax = float(cfg.SIM_REALTIME_SPEED_TRACKBAR_MAX)
+    pos = int(round(t * tmax))
+    pos = int(np.clip(pos, 0, int(cfg.SIM_REALTIME_SPEED_TRACKBAR_MAX)))
+    ui["speed_track_pos"] = pos
+    ui["speed_scale"] = _rt_speed_scale_from_trackbar_pos(pos)
+
+
+def _rt_draw_speed_slider(img: np.ndarray, ui: dict) -> None:
+    """Draw a draggable speed control strip at the bottom of the BEV (HighGUI trackbars are often invisible)."""
+    h, w = img.shape[:2]
+    pad = 16
+    sy1 = h - 8
+    sy0 = h - 36
+    sx0 = pad
+    sx1 = w - pad
+    if sx1 <= sx0 + 20 or sy1 <= sy0:
+        ui["speed_slider_rect"] = (-1, -1, -2, -2)
+        return
+    ui["speed_slider_rect"] = (sx0, sy0, sx1, sy1)
+    cv2.rectangle(img, (sx0, sy0), (sx1, sy1), (35, 35, 42), -1, cv2.LINE_AA)
+    cv2.rectangle(img, (sx0, sy0), (sx1, sy1), (160, 160, 170), 1, cv2.LINE_AA)
+    pos = int(
+        np.clip(
+            int(ui.get("speed_track_pos", cfg.SIM_REALTIME_SPEED_TRACKBAR_DEFAULT)),
+            0,
+            int(cfg.SIM_REALTIME_SPEED_TRACKBAR_MAX),
+        )
+    )
+    span = float(max(1, sx1 - sx0))
+    tx = int(round(sx0 + span * (pos / float(cfg.SIM_REALTIME_SPEED_TRACKBAR_MAX))))
+    tx = int(np.clip(tx, sx0 + 6, sx1 - 6))
+    cy = (sy0 + sy1) // 2
+    cv2.circle(img, (tx, cy), 8, (55, 55, 62), -1, cv2.LINE_AA)
+    cv2.circle(img, (tx, cy), 8, (120, 255, 140), 2, cv2.LINE_AA)
+    sc = float(ui.get("speed_scale", 1.0))
+    cap = f"Sim speed {sc:.2f}x  (drag bar)"
+    cv2.putText(
+        img,
+        cap,
+        (sx0, sy0 - 6),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.5,
+        (210, 255, 215),
+        1,
+        cv2.LINE_AA,
+    )
+
+
 def _bev_realtime_frame(
     world_bgr: np.ndarray,
     path: list[tuple[float, float, float]],
@@ -434,10 +495,27 @@ def _rt_draw_paused_banner(img: np.ndarray) -> None:
 
 
 def _rt_mouse_bev(event: int, x: int, y: int, flags: int, ui: dict) -> None:
-    # ``LBUTTONUP`` avoids spurious ``DOWN`` events when the window grabs focus (would toggle pause).
-    if event != cv2.EVENT_LBUTTONUP:
-        return
     if int(ui.get("sim_step", 0)) < 2:
+        return
+    sr = ui.get("speed_slider_rect")
+    if sr is not None and sr[2] > sr[0] and sr[3] > sr[1]:
+        sx0, sy0, sx1, sy1 = sr
+        if event == cv2.EVENT_LBUTTONDOWN:
+            if sx0 <= x <= sx1 and sy0 <= y <= sy1:
+                ui["speed_drag"] = True
+                _rt_speed_slider_set_from_mx(ui, x, sx0, sx1)
+            return
+        if event == cv2.EVENT_MOUSEMOVE and (flags & cv2.EVENT_FLAG_LBUTTON):
+            if ui.get("speed_drag"):
+                _rt_speed_slider_set_from_mx(ui, x, sx0, sx1)
+            return
+        if event == cv2.EVENT_LBUTTONUP:
+            if ui.get("speed_drag"):
+                ui["speed_drag"] = False
+                _rt_speed_slider_set_from_mx(ui, x, sx0, sx1)
+                return
+    # Pause: ``LBUTTONUP`` avoids spurious ``DOWN`` when the window grabs focus.
+    if event != cv2.EVENT_LBUTTONUP:
         return
     x1, y1, x2, y2 = ui["bev_rect"]
     if x2 <= x1 or y2 <= y1:
@@ -687,7 +765,7 @@ def run_simulation() -> tuple[
 
     path: list[tuple[float, float, float]] = [(x0, y0, psi)]
     x, y = x0, y0
-    step_dist_px = cfg.SIM_SPEED_M_S * cfg.SIM_DT * px_per_m
+    base_step_dist_px = cfg.SIM_SPEED_M_S * cfg.SIM_DT * px_per_m
 
     lateral_px = _ego_lateral_offset_px(dw)
     off_ok = dw._offramp_bezier_controls() is not None
@@ -721,6 +799,12 @@ def run_simulation() -> tuple[
         "bev_rect": (-1, -1, -2, -2),
         "drv_rect": (-1, -1, -2, -2),
         "sim_step": 0,
+        "speed_scale": _rt_speed_scale_from_trackbar_pos(
+            int(cfg.SIM_REALTIME_SPEED_TRACKBAR_DEFAULT)
+        ),
+        "speed_track_pos": int(cfg.SIM_REALTIME_SPEED_TRACKBAR_DEFAULT),
+        "speed_drag": False,
+        "speed_slider_rect": (-1, -1, -2, -2),
     }
     user_quit_rt = False
     interrupt_rt = [False]
@@ -743,6 +827,7 @@ def run_simulation() -> tuple[
                 user_quit_rt = True
                 break
             rt_ui["sim_step"] = sim_i
+            step_dist_px = base_step_dist_px * float(rt_ui.get("speed_scale", 1.0))
             if on_ramp:
                 ev_pose = dw.offramp_bezier_evolution(u_ramp)
                 if ev_pose is None:
@@ -910,8 +995,14 @@ def run_simulation() -> tuple[
                                 rt_ui,
                             )
                         fr = _bev_realtime_frame(
-                            world, path, x, y, psi_draw, lateral_px
+                            world,
+                            path,
+                            x,
+                            y,
+                            psi_draw,
+                            lateral_px,
                         )
+                        _rt_draw_speed_slider(fr, rt_ui)
                     if not rt_windows_placed:
                         _tile_realtime_sim_windows(fr, drv)
                         rt_windows_placed = True

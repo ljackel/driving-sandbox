@@ -156,7 +156,7 @@ PERTURB_YAW_STD_DEG = 0.0
 # Steering recentering on perturbed rows: −GAIN_LAT·lat_m − GAIN_YAW·yaw_rad (after κ scaling).
 TRAIN_PERTURB_RECENTER_GAIN_LAT = 0.35
 TRAIN_PERTURB_RECENTER_GAIN_YAW = 2.0
-TRAIN_PERTURB_VIEW_RETRIES = 30
+TRAIN_PERTURB_VIEW_RETRIES = 15
 # Extra perturbed train frames beyond the 1:1 grid (indices ``2*NUM_TRAIN_FRAMES ..``); ``y`` sampled
 # from the train grid with replacement. This does *not* turn off aligned clean/perturbed pairs
 # (``NUM_TRAIN_FRAMES`` clean then ``NUM_TRAIN_FRAMES`` perturbed); for clean-only train data set
@@ -342,6 +342,13 @@ SIM_REALTIME_BEV_WAIT_MS = 1
 # Extra pause (ms) per step **when a live OpenCV window is shown** (easier to follow; does not change physics).
 # Physics timing is still ``SIM_DT`` / ``SIM_SPEED_M_S``; to slow the integrated roll-out itself, change those.
 SIM_REALTIME_STEP_PAUSE_MS = 30
+# BEV on-map speed bar (drag): position / ``SIM_REALTIME_SPEED_TRACKBAR_CENTER`` scales arc-length step per
+# roll-out iteration (100 = nominal ``SIM_SPEED_M_S * SIM_DT`` in px). Names are legacy from cv2 trackbars.
+SIM_REALTIME_SPEED_TRACKBAR_MAX = 200
+SIM_REALTIME_SPEED_TRACKBAR_DEFAULT = 100
+SIM_REALTIME_SPEED_TRACKBAR_CENTER = 100
+SIM_REALTIME_SPEED_SCALE_MIN = 0.05
+SIM_REALTIME_SPEED_SCALE_MAX = 2.0
 
 # --- Dummy data (generate_dummy_data.py) ---
 DUMMY_NUM_SAMPLES = 100
