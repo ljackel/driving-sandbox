@@ -1,4 +1,5 @@
 import os
+import re
 
 import pandas as pd
 import torch
@@ -32,6 +33,29 @@ def count_train_test_examples() -> tuple[int, int]:
     n_train = int(df["image_path"].str.startswith("train/").sum())
     n_test = int(df["image_path"].str.startswith("test/").sum())
     return n_train, n_test
+
+
+_FRAME_IDX_RE = re.compile(r"frame_(\d+)\.", re.IGNORECASE)
+
+
+def train_perturb_stats_from_labels() -> tuple[int, int, float]:
+    """
+    From the active labels CSV: total ``train/`` rows, how many are perturbation views (frame index
+    ``>= NUM_TRAIN_FRAMES``, matching ``generate_dataset`` naming), and that fraction of the train split.
+    """
+    df = pd.read_csv(resolve_labels_csv_path())
+    train = df[df["image_path"].str.startswith("train/")]
+    n = len(train)
+    clean_n = int(cfg.NUM_TRAIN_FRAMES)
+    n_pert = 0
+    for raw in train["image_path"]:
+        norm = str(raw).replace("\\", "/")
+        base = norm.rsplit("/", 1)[-1]
+        m = _FRAME_IDX_RE.search(base)
+        if m is not None and int(m.group(1)) >= clean_n:
+            n_pert += 1
+    frac = float(n_pert) / float(n) if n else 0.0
+    return n, n_pert, frac
 
 
 def prepare_perspective_pil_for_model(im: Image.Image) -> Image.Image:

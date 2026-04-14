@@ -28,7 +28,7 @@ import numpy as np
 import torch
 
 import config as cfg
-from data_loader import count_train_test_examples
+from data_loader import count_train_test_examples, train_perturb_stats_from_labels
 from perspective_camera import perspective_camera_view
 from reproducibility import set_global_seed
 
@@ -88,6 +88,42 @@ def latest_checkpoint_path() -> str | None:
         if m > best_mtime:
             best_path = data_w
     return best_path
+
+
+def _put_outlined_lines_bgr(
+    img: np.ndarray,
+    lines: list[str],
+    org_xy: tuple[int, int],
+    line_step_px: int = 14,
+) -> None:
+    """Stacked white labels with black outline (in-place); same style as ``generate_dataset`` overlays."""
+    x0, y0 = org_xy
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    scale, thick = cfg.ANNOT_FONT_SCALE, cfg.ANNOT_FONT_THICKNESS
+    outline_offsets = (
+        (-1, 0),
+        (1, 0),
+        (0, -1),
+        (0, 1),
+        (-1, -1),
+        (1, 1),
+        (-1, 1),
+        (1, -1),
+    )
+    for i, label in enumerate(lines):
+        x, y = x0, y0 + i * line_step_px
+        for dx, dy in outline_offsets:
+            cv2.putText(
+                img,
+                label,
+                (x + dx, y + dy),
+                font,
+                scale,
+                (0, 0, 0),
+                thick + 1,
+                cv2.LINE_AA,
+            )
+        cv2.putText(img, label, (x, y), font, scale, (255, 255, 255), thick, cv2.LINE_AA)
 
 
 def get_view_from_pose(
@@ -371,6 +407,15 @@ def main() -> None:
     os.makedirs(out_dir, exist_ok=True)
     out_png = os.path.join(out_dir, "sim_path.png")
     out_csv = os.path.join(out_dir, "ego_path.csv")
+    n_tr_stat, n_pert, frac_pert = train_perturb_stats_from_labels()
+    _put_outlined_lines_bgr(
+        vis,
+        [
+            f"Training examples: {n_tr_stat}",
+            f"Perturbed: {frac_pert:.1%} ({n_pert}/{n_tr_stat})",
+        ],
+        cfg.ANNOT_STEERING_POS,
+    )
     cv2.imwrite(out_png, vis)
     np.savetxt(
         out_csv,
