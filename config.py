@@ -28,6 +28,9 @@ import types
 DATA_DIR = "data"
 RUNS_DIR = "runs"
 CHECKPOINT_FILENAME = "driving_net.pt"
+# ``latest_checkpoint_path`` (simulate / eval): prefer ``runs/.../driving_net.pt`` unless ``data/`` copy
+# is newer by at least this many seconds (avoids sync nudging ``data/`` ahead so sim artifacts land only in ``data/``).
+CHECKPOINT_PREFER_DATA_IF_NEWER_BY_SEC = 10.0
 LABELS_CSV = "labels.csv"
 LABELS_CSV_ALT = "labels_new.csv"
 LABELS_TMP = "labels.partial.tmp"
@@ -53,7 +56,7 @@ SIM_FP_VIDEO_ENABLE = True
 OFFRAMP_ENABLE = True
 # Simulation: DrivingNet ``take_offramp`` input (1 = ramp intent; 0 = stay on main).
 # Off-ramp **geometry** in sim also needs ``SIM_PROJECT_REF_ONTO_MAIN_ROAD`` (see below).
-SIM_TAKE_OFFRAMP = False
+SIM_TAKE_OFFRAMP = True
 # Simulation: advance the centerline reference by arc length along the main spline (and off-ramp Bézier when
 # ``SIM_TAKE_OFFRAMP``). Avoids ``cos/sin(psi)`` + ``x=cs(y)`` chord errors. False = free BC integration (no ramp path).
 SIM_PROJECT_REF_ONTO_MAIN_ROAD = True

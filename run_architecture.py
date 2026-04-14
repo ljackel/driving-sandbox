@@ -58,16 +58,16 @@ def _mermaid_block(model: DrivingNet) -> str:
         f1 = fh + 1
         return f"""flowchart TB
   IMG["RGB image (N, 3, {h}, {h})"]
-  INTENT["take_offramp (N, 1)<br/>0 = main road, 1 = off-ramp<br/>CSV column in train; SIM_TAKE_OFFRAMP in sim"]
+  OFFRAMP["**Off-ramp control**<br/>tensor `take_offramp` (N, 1)<br/>values 0 or 1 — **not** image pixels<br/>train: `labels.csv`; sim: `SIM_TAKE_OFFRAMP`"]
   subgraph CNN["CNN backbone"]
     C1["Conv2d 3→{c1}, k={k}, s={s} + ReLU"]
     C2["Conv2d {c1}→{c2}, k={k}, s={s} + ReLU"]
   end
   FL["Flatten → (N, {fh})"]
-  CAT["torch.cat (feats, take_offramp) → (N, {f1})"]
+  CAT["`torch.cat` (vision feats, take_offramp) → (N, {f1})"]
   OUT["Linear (N, {f1})→(N, {out})<br/>steering = [:, 0]"]
   IMG --> C1 --> C2 --> FL --> CAT --> OUT
-  INTENT --> CAT
+  OFFRAMP --> CAT
 """
     p = model.token_grid
     t = model.num_tokens
@@ -77,7 +77,7 @@ def _mermaid_block(model: DrivingNet) -> str:
     ff = cfg.MODEL_TRANSFORMER_FF_DIM
     return f"""flowchart TB
   IMG["RGB image (N, 3, {h}, {h})"]
-  INTENT["take_offramp (N, 1)<br/>0 = main road, 1 = off-ramp<br/>CSV column in train; SIM_TAKE_OFFRAMP in sim"]
+  OFFRAMP["**Off-ramp control**<br/>tensor `take_offramp` (N, 1)<br/>values 0 or 1 — **not** image pixels<br/>train: `labels.csv`; sim: `SIM_TAKE_OFFRAMP`"]
   subgraph CNN["CNN backbone"]
     C1["Conv2d 3→{c1}, k={k}, s={s} + ReLU"]
     C2["Conv2d {c1}→{c2}, k={k}, s={s} + ReLU"]
@@ -89,26 +89,27 @@ def _mermaid_block(model: DrivingNet) -> str:
     ENC["Encoder ×{L}: d={d}, heads={nh}, FFN={ff}"]
   end
   POOL2["Mean over tokens → (N, {d})"]
-  CAT["torch.cat (pooled, take_offramp) → (N, {d}+1)"]
+  CAT["`torch.cat` (pooled vector, take_offramp) → (N, {d}+1)"]
   HEAD["Linear (N, {d}+1)→(N, {out})<br/>steering = [:, 0]"]
   IMG --> C1 --> C2 --> POOL --> TOK --> PROJ --> ENC --> POOL2 --> CAT --> HEAD
-  INTENT --> CAT
+  OFFRAMP --> CAT
 """
 
 
 def _write_architecture_png(path: str, model: DrivingNet, rows: list[tuple[str, int]]) -> None:
-    """Simple left-to-right block diagram with per-block parameter counts."""
+    """Left-to-right backbone blocks + off-ramp control box merging into the final Linear."""
     labels = [f"{name}\n({_fmt_int(n)} params)" if n else f"{name}\n(no params)" for name, n in rows]
     nbox = len(labels)
-    fig, ax = plt.subplots(figsize=(16, 4))
+    fig, ax = plt.subplots(figsize=(16, 5.2))
     ax.set_xlim(0, max(8, nbox * 1.2 + 1))
-    ax.set_ylim(0, 3)
+    ax.set_ylim(0, 3.4)
     ax.axis("off")
     total = sum(n for _, n in rows)
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     fig.suptitle(
-        f"DrivingNet — {_fmt_int(total)} parameters ({_fmt_int(trainable)} trainable)",
-        fontsize=12,
+        f"DrivingNet — {_fmt_int(total)} parameters ({_fmt_int(trainable)} trainable)\n"
+        r"Off-ramp: scalar $take\_offramp$ (N,1) is concatenated with vision features before the final Linear",
+        fontsize=11,
         fontweight="bold",
     )
     for i, label in enumerate(labels):
@@ -139,6 +140,42 @@ def _write_architecture_png(path: str, model: DrivingNet, rows: list[tuple[str, 
                 xytext=(x + 1.0, 1.5),
                 arrowprops=dict(arrowstyle="->", color="#555", lw=1.2),
             )
+    if nbox >= 1:
+        x_last = 0.8 + (nbox - 1) * 1.15
+        cx_last = x_last + 0.5
+        ix = max(0.35, x_last - 1.05)
+        iy = 0.12
+        iw, ih = 1.15, 0.88
+        intent = mpatches.FancyBboxPatch(
+            (ix, iy),
+            iw,
+            ih,
+            boxstyle="round,pad=0.04,rounding_size=0.08",
+            linewidth=1.4,
+            edgecolor="#b35900",
+            facecolor="#ffe8d4",
+        )
+        ax.add_patch(intent)
+        ax.text(
+            ix + iw / 2,
+            iy + ih / 2,
+            "Off-ramp control\n`take_offramp` (N, 1)\nnot image pixels\n→ concat before Linear",
+            ha="center",
+            va="center",
+            fontsize=7,
+            linespacing=1.1,
+        )
+        ax.annotate(
+            "",
+            xy=(cx_last, 1.0),
+            xytext=(ix + iw / 2, iy + ih),
+            arrowprops=dict(
+                arrowstyle="->",
+                color="#b35900",
+                lw=1.6,
+                connectionstyle="arc3,rad=0.12",
+            ),
+        )
     fig.savefig(path, dpi=150, bbox_inches="tight", facecolor="white")
     plt.close(fig)
 
@@ -174,9 +211,9 @@ def write_architecture_artifacts(run_dir: str, model: nn.Module) -> None:
     lines.extend(
         [
             "",
-            "### Intent input `take_offramp`",
+            "### Off-ramp control input `take_offramp`",
             "",
-            "Not part of the image tensor. A per-batch scalar **(N, 1)** in **{0, 1}** is **concatenated** to the pooled vector before the final `Linear` (see `DrivingNet.forward`).",
+            "Not part of the image tensor. A per-batch scalar **(N, 1)** with values **0 or 1** is **concatenated** to the vision vector before the final `Linear` (`DrivingNet.forward`). The **Mermaid diagram** and **`architecture.png`** both show this side input merging at the `torch.cat` step.",
             "",
             "- **Training:** `take_offramp` column in `labels.csv` (from `generate_dataset`: main rows = 0, `offramp_*.jpg` = 1).",
             "- **Simulation:** `SIM_TAKE_OFFRAMP` in `config.py` → tensor passed as the second argument to `model(...)`.",

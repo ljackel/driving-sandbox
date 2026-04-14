@@ -99,9 +99,11 @@ def simulation_output_dir(ckpt: str) -> str:
 
 def latest_checkpoint_path() -> str | None:
     """
-    Find the newest ``driving_net.pt`` by modification time.
+    Find the best ``driving_net.pt`` for roll-out / eval.
 
-    Scans ``runs/*/<CHECKPOINT_FILENAME>`` then compares with ``data/<CHECKPOINT_FILENAME>``.
+    Picks the newest checkpoint under ``runs/*/``. Uses ``data/<CHECKPOINT_FILENAME>`` only if it is
+    **meaningfully newer** (see ``CHECKPOINT_PREFER_DATA_IF_NEWER_BY_SEC``) so a fresh train + copy
+    to ``data/`` still resolves to the ``runs/`` copy when mtimes are tied or skewed slightly.
     """
     root = _project_root()
     runs = os.path.join(root, cfg.RUNS_DIR)
@@ -119,10 +121,14 @@ def latest_checkpoint_path() -> str | None:
                     best_mtime = m
                     best_path = w
     data_w = os.path.join(root, cfg.DATA_DIR, cfg.CHECKPOINT_FILENAME)
-    if os.path.isfile(data_w):
-        m = os.path.getmtime(data_w)
-        if m > best_mtime:
-            best_path = data_w
+    if best_path is None:
+        return data_w if os.path.isfile(data_w) else None
+    if not os.path.isfile(data_w):
+        return best_path
+    data_m = os.path.getmtime(data_w)
+    thr = float(cfg.CHECKPOINT_PREFER_DATA_IF_NEWER_BY_SEC)
+    if data_m > best_mtime + thr:
+        return data_w
     return best_path
 
 

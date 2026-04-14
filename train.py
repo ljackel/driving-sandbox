@@ -33,6 +33,15 @@ set_global_seed(cfg.TRAIN_SEED)
 from driving_model import DrivingNet
 from run_architecture import write_architecture_artifacts
 
+
+def _write_latest_run_pointer(repo_root: str, run_dir: str, status: str) -> None:
+    """``runs/LATEST_RUN.txt``: absolute run path + ``in_progress`` / ``complete`` (gitignored with ``runs/``)."""
+    p = os.path.join(repo_root, cfg.RUNS_DIR, "LATEST_RUN.txt")
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p, "w", encoding="utf-8") as f:
+        f.write(os.path.abspath(run_dir) + "\n")
+        f.write(status + "\n")
+
 _RED = "\033[31m"
 _GRN = "\033[32m"
 _RST = "\033[0m"
@@ -100,6 +109,7 @@ _root = os.path.dirname(os.path.abspath(__file__))
 _run_stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 run_dir = os.path.join(_root, cfg.RUNS_DIR, _run_stamp)
 os.makedirs(run_dir, exist_ok=True)
+_write_latest_run_pointer(_root, run_dir, "in_progress")
 write_architecture_artifacts(run_dir, model)
 print(
     f"Wrote architecture diagram: {os.path.join(run_dir, 'architecture.md')!r} "
@@ -112,7 +122,11 @@ print(
     f"(from {resolve_labels_csv_path()!r})"
 )
 print(f"Starting training on {device}...")
-print(f"Run artifacts directory: {run_dir!r}")
+print(f"Run artifacts directory: {os.path.abspath(run_dir)!r}")
+print(
+    f"Latest-run pointer: {os.path.join(_root, cfg.RUNS_DIR, 'LATEST_RUN.txt')!r} "
+    "(path + status; ends with 'complete' when training finishes)"
+)
 if test_loader is not None:
     print(
         f"Warmup: epochs 1..{cfg.CHECKPOINT_MIN_EPOCH - 1} skip best-test tracking; "
@@ -289,18 +303,20 @@ shutil.copy2(os.path.join(_root, "config.py"), os.path.join(run_dir, "config.py"
 bev_path = os.path.join(run_dir, "world_bev.png")
 cv2.imwrite(bev_path, DrivingWorld().image)
 
+_write_latest_run_pointer(_root, run_dir, "complete")
+
 _crit = "test" if test_loader is not None else "train"
 if checkpoint_fallback_last_epoch:
     print(
-        f"Training complete. Last-epoch weights (epoch {epochs}) saved under {run_dir!r} "
-        f"and {data_checkpoint!r} (no improvement with epoch >= {cfg.CHECKPOINT_MIN_EPOCH}). "
+        f"Training complete. Last-epoch weights (epoch {epochs}) saved under {os.path.abspath(run_dir)!r} "
+        f"and {os.path.abspath(data_checkpoint)!r} (no improvement with epoch >= {cfg.CHECKPOINT_MIN_EPOCH}). "
         f"Best {_crit} metric seen: {_report_metric:.4f} at epoch {best_epoch}. "
         f"Bird's-eye map: {bev_path!r}."
     )
 else:
     print(
         f"Training complete. Best-by-{_crit} weights from epoch {best_epoch} "
-        f"(metric={_report_metric:.4f}) saved under {run_dir!r} "
-        f"and {data_checkpoint!r} for evaluate_test.py. "
+        f"(metric={_report_metric:.4f}) saved under {os.path.abspath(run_dir)!r} "
+        f"and {os.path.abspath(data_checkpoint)!r} for evaluate_test.py. "
         f"Bird's-eye map: {bev_path!r}."
     )
