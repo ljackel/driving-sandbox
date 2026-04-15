@@ -21,7 +21,9 @@ With ``SIM_FP_VIDEO_ENABLE``,
 each driver crop is written to ``sim_first_person.mp4`` (same preprocessing as the model when
 ``PERSPECTIVE_INPUT_BOTTOM_HALF_ONLY`` is true: bottom half of the warp, resized to ``CAMERA_IMAGE_SIZE``).
 With ``SIM_REALTIME_BEV`` / ``SIM_REALTIME_DRIVER_VIEW``, live OpenCV windows show the map trail and/or
-the ego camera (same crop as the model). **Pause** freezes the roll-out (Space, ``p``, or the **Pause**
+the ego camera (same crop as the model). When ``SIM_TAKE_OFFRAMP_UPPER_HALF_NAV`` is true and ego is in the
+upper BEV half, the BEV draws a small **navigation instruction** box (``SIM_NAV_EXIT_INSTRUCTION_TEXT``) in the
+upper-left; step/hint text shifts downward so it does not overlap. **Pause** freezes the roll-out (Space, ``p``, or the **Pause**
 button on each window); **Resume** continues. While **paused** on the BEV, **drag the ego vehicle icon**
 to snap the pose to another spot on the road (trail resets), then resume. Press ``q`` to stop, or **Ctrl+C** in the terminal
 (focus may need to be on the terminal; live windows use short ``waitKey`` polls so Ctrl+C can interrupt).
@@ -35,10 +37,11 @@ With CUDA, ``SIM_CUDNN_BENCHMARK`` and optional ``SIM_TORCH_COMPILE`` reduce per
 **Input crop:** ``PERSPECTIVE_INPUT_BOTTOM_HALF_ONLY`` matches ``train.py`` / ``evaluate_test.py`` (bottom
 half of the warp, then resize to ``CAMERA_IMAGE_SIZE``).
 
-**Intent / off-ramp:** ``take_offramp`` to the network follows ``SIM_TAKE_OFFRAMP`` or geographic
-``SIM_TAKE_OFFRAMP_UPPER_HALF_NAV``. With ``SIM_PROJECT_REF_ONTO_MAIN_ROAD`` and off-ramps enabled, kinematics
-merge onto a ramp at a branch ``y`` only when that intent is active (so e.g. exit 117 in the upper half can be
-taken while skipping a lower-half exit).
+**Intent / off-ramp:** Each step sets the ``take_offramp`` tensor from ``SIM_TAKE_OFFRAMP`` or from geographic
+``SIM_TAKE_OFFRAMP_UPPER_HALF_NAV`` (upper BEV half ⇒ 1). With ``SIM_PROJECT_REF_ONTO_MAIN_ROAD`` and
+``OFFRAMP_ENABLE``, **kinematics** may follow off-ramp Béziers after a **merge** at a branch row; the merge
+happens only when intent is active on that step (so a lower-half branch can be skipped while an upper-half
+exit—e.g. a row listed in ``OFFRAMP_EXTRA_BRANCH_Y_PX``—still merges when ``take_offramp`` is 1).
 
 **Camera / overlay heading:** the warp and BEV trail use the **road tangent** at ``(x, y)``—main spline or
 ramp Bézier when on the ramp—not the integrated BC ``psi``. Otherwise ``psi`` drift places the right-lane
@@ -535,7 +538,11 @@ def _draw_bev_ego_car_icon(
 def _bev_draw_nav_instruction_box(
     vis: np.ndarray, text: str, *, x0: int = 10, y0: int = 8
 ) -> int:
-    """Filled + bordered box in the upper-left; returns y just below the box."""
+    """Draw a dark filled rectangle with a light border and ``text`` (realtime BEV nav cue).
+
+    Returns:
+        Image ``y`` coordinate just below the box so callers can place the step counter lower.
+    """
     font = cv2.FONT_HERSHEY_SIMPLEX
     scale = 0.58
     thick = 2
@@ -564,6 +571,7 @@ def _bev_draw_nav_instruction_box(
 
 
 def _bev_nav_exit_active(y_img: float, h_map: int) -> bool:
+    """True when geographic nav is enabled and ego row ``y_img`` is in the upper half of a ``h_map``-tall BEV."""
     if not bool(cfg.SIM_TAKE_OFFRAMP_UPPER_HALF_NAV):
         return False
     return float(y_img) <= 0.5 * float(h_map)
@@ -582,7 +590,11 @@ def _bev_realtime_frame(
     nav_exit_active: bool = False,
     nav_exit_text: str = "take the next exit",
 ) -> np.ndarray:
-    """Bird's-eye frame: trail and ego in the **right lane** (not centerline)."""
+    """Bird's-eye frame: trail and ego in the **right lane** (not centerline).
+
+    ``nav_exit_active`` / ``nav_exit_text`` control the optional upper-left instruction box (see
+    ``SIM_TAKE_OFFRAMP_UPPER_HALF_NAV`` and ``SIM_NAV_EXIT_INSTRUCTION_TEXT`` in config).
+    """
     vis = world_bgr.copy()
     if len(path) >= 2:
         n = len(path)
@@ -1061,6 +1073,8 @@ def _bev_reloc_snap_validated(
     """
     Snap a BEV click to the nearest valid drivable pose (main and/or ramp), preferring smaller
     screen-space error. ``psi`` is road tangent; ``get_view_from_pose`` must succeed.
+    When ``ramp_kinematics`` is true (off-ramps enabled with projection-on sim), ramp snaps are
+    considered in addition to the main-road right lane.
     """
     candidates: list[
         tuple[float, float, float, float, bool, float, int]
@@ -1191,6 +1205,10 @@ def run_simulation() -> tuple[
 
     When ``SIM_FP_VIDEO_ENABLE`` is true, writes each driver crop (plus a final pose frame when
     available) to ``<simulation_output_dir>/<SIM_FP_VIDEO_FILENAME>`` at ``SIM_VIDEO_FPS``.
+
+    **Off-ramps:** With projection and ``OFFRAMP_ENABLE``, the pose advances on the main spline until a
+    branch row is crossed; it **merges** onto the corresponding Bézier only when ``take_offramp`` intent is
+    active for that step (``SIM_TAKE_OFFRAMP_UPPER_HALF_NAV`` vs ``SIM_TAKE_OFFRAMP``; see ``config``).
 
     Returns:
         ``world_bgr``, list of ``SimPathPoint`` (centerline ``x,y``, integrated ``psi``, ramp flag,

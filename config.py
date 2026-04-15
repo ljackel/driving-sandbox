@@ -20,6 +20,10 @@ Summary:
 - **Training:** MSE on ``DrivingNet`` channel 0 only with ``take_offramp`` concatenated to the head input; ``EPOCHS`` is in switches; see ``MODEL_USE_TRANSFORMER_HEAD``, ``LEARNING_RATE``.
 - **Simulation:** ``SIM_YAW_RATE_GAIN`` from ``_compute_sim_yaw_rate_gain`` aligns ``psi += steering * gain * dt``
   with curvature step semantics on the train/test ``y`` grid. Optional first-person MP4: ``SIM_FP_VIDEO_*``.
+  Off-ramp **merges** (main → Bézier) require ``SIM_PROJECT_REF_ONTO_MAIN_ROAD`` and ``OFFRAMP_ENABLE``; at each
+  branch, the sim merges only if ``take_offramp`` intent is on—either fixed ``SIM_TAKE_OFFRAMP`` for the whole
+  run, or per-step upper-half geographic intent when ``SIM_TAKE_OFFRAMP_UPPER_HALF_NAV`` is true (with optional
+  BEV nav text ``SIM_NAV_EXIT_INSTRUCTION_TEXT``).
 """
 from __future__ import annotations
 

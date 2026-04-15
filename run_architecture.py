@@ -99,7 +99,7 @@ def _mermaid_block(model: DrivingNet) -> str:
         f1 = fh + 1
         return f"""flowchart TB
   IMG["RGB image (N, 3, {h}, {h})"]
-  OFFRAMP["**Off-ramp control**<br/>tensor `take_offramp` (N, 1)<br/>values 0 or 1 — **not** image pixels<br/>train: `labels.csv`; sim: `SIM_TAKE_OFFRAMP`"]
+  OFFRAMP["**Off-ramp control**<br/>tensor `take_offramp` (N, 1)<br/>values 0 or 1 — **not** image pixels<br/>train: `labels.csv`; sim: `SIM_TAKE_OFFRAMP` / `SIM_TAKE_OFFRAMP_UPPER_HALF_NAV`"]
   subgraph CNN["CNN backbone"]
     C1["Conv2d 3→{c1}, k={k}, s={s} + ReLU"]
     C2["Conv2d {c1}→{c2}, k={k}, s={s} + ReLU"]
@@ -118,7 +118,7 @@ def _mermaid_block(model: DrivingNet) -> str:
     ff = cfg.MODEL_TRANSFORMER_FF_DIM
     return f"""flowchart TB
   IMG["RGB image (N, 3, {h}, {h})"]
-  OFFRAMP["**Off-ramp control**<br/>tensor `take_offramp` (N, 1)<br/>values 0 or 1 — **not** image pixels<br/>train: `labels.csv`; sim: `SIM_TAKE_OFFRAMP`"]
+  OFFRAMP["**Off-ramp control**<br/>tensor `take_offramp` (N, 1)<br/>values 0 or 1 — **not** image pixels<br/>train: `labels.csv`; sim: `SIM_TAKE_OFFRAMP` / `SIM_TAKE_OFFRAMP_UPPER_HALF_NAV`"]
   subgraph CNN["CNN backbone"]
     C1["Conv2d 3→{c1}, k={k}, s={s} + ReLU"]
     C2["Conv2d {c1}→{c2}, k={k}, s={s} + ReLU"]
@@ -307,7 +307,7 @@ def write_architecture_artifacts(run_dir: str, model: nn.Module) -> None:
             "Not part of the image tensor. A per-batch scalar **(N, 1)** with values **0 or 1** is **concatenated** to the vision vector before the final `Linear` (`DrivingNet.forward`). The **Mermaid diagram** and **`architecture.png`** both show this side input merging at the `torch.cat` step.",
             "",
             "- **Training:** `take_offramp` column in `labels.csv` (from `generate_dataset`: main rows = 0, `offramp_*.jpg` = 1).",
-            "- **Simulation:** `SIM_TAKE_OFFRAMP` in `config.py` → tensor passed as the second argument to `model(...)`.",
+            "- **Simulation:** per-step `take_offramp` tensor from `SIM_TAKE_OFFRAMP` or geographic `SIM_TAKE_OFFRAMP_UPPER_HALF_NAV` in `config.py` (second argument to `model(...)`); merge-at-branch follows the same intent (see `simulate.py`).",
             "- **Omit / `None`:** treated as all zeros (main road).",
             "",
             "## Diagram (Mermaid)",

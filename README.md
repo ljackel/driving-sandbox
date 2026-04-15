@@ -97,7 +97,7 @@ Most scripts import **`config.py`** as `cfg`; change hyperparameters there rathe
 
 | File | Purpose |
 |------|---------|
-| **`simulate.py`** | Loads **latest checkpoint**, steps the policy on the map (reference pose on main spline or off-ramp when configured), optional **real-time BEV/driver** windows, optional **MP4**; saves trajectory CSV and path overlay. Run: `python simulate.py`. |
+| **`simulate.py`** | Loads **latest checkpoint**, steps the policy on the map (main spline by arc length; **off-ramp Bézier** after a branch merge when intent allows), optional **real-time BEV/driver** windows, optional **MP4**; saves trajectory CSV and path overlay. Run: `python simulate.py`. |
 
 ### Utilities and scratch
 
@@ -115,6 +115,17 @@ Most scripts import **`config.py`** as `cfg`; change hyperparameters there rathe
 - **Main road:** Training rows use the **bottom** BEV half (`y` toward the bottom of the image); test rows use the **top** half. `DATASET_MIX_TRAIN_TEST_GEOGRAPHY` only **shuffles order within** each half.
 - **Steering:** Derived from **signed curvature** (main spline or off-ramp Bézier), **globally scaled** by max |κ| in the CSV so values stay in a bounded range; see `config.py` for clipping and perturb recentering.
 - **Off-ramps:** Optional extra map arms and `train/offramp_*.jpg` / `test/offramp_*.jpg` with `take_offramp=1` in `labels.csv`. Train ramp crops are spaced along each ramp at the **same mean arc spacing** as main-road train frames (within the train half), subject to off-ramp caps in config.
+
+---
+
+## Simulation intent and off-ramps
+
+Open-loop roll-out passes a scalar **`take_offramp`** tensor into `DrivingNet` each step (same role as the CSV column at training time). **Reference kinematics** use arc length on the main centerline when `SIM_PROJECT_REF_ONTO_MAIN_ROAD` is true; with `OFFRAMP_ENABLE`, the sim can **merge** onto a Bézier off-ramp when the ego crosses a branch row (`DrivingWorld.offramp_branch_y_pxs()`), but only if **intent** says to take an exit on that step:
+
+- **`SIM_TAKE_OFFRAMP_UPPER_HALF_NAV` (default on):** `take_offramp` is **1** while ego image-`y` is in the **upper** half of the BEV (`y ≤ WORLD_IMAGE_SIZE/2`, origin top-left), and **0** in the lower half. The realtime BEV can show a **nav box** with `SIM_NAV_EXIT_INSTRUCTION_TEXT` whenever that geographic intent is active. This pattern lets a **lower-half** exit (e.g. primary branch) stay on the main road while an **upper-half** exit (e.g. a second branch / “exit 117” style row in `OFFRAMP_EXTRA_BRANCH_Y_PX`) still merges when intent is on.
+- **`SIM_TAKE_OFFRAMP_UPPER_HALF_NAV` off:** `take_offramp` and merge-at-branch behavior follow the fixed flag **`SIM_TAKE_OFFRAMP`** for the whole rollout (merge at every branch when true).
+
+Paused BEV **drag-to-relocate** can snap to main or ramp when off-ramps exist (`ramp_kinematics` in code), independent of the merge flags above.
 
 ---
 

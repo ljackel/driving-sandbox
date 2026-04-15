@@ -10,7 +10,9 @@ class DrivingNet(nn.Module):
     on the flattened conv map (controlled by ``MODEL_USE_TRANSFORMER_HEAD``).
 
     **Steering** is **channel 0**; training and simulation use only that channel (channel 1 is unused).
-    A scalar **take_offramp** (0/1) is concatenated to the pooled features before the final linear layer.
+    A scalar **take_offramp** (0/1) is concatenated to the pooled features before the final linear layer
+    (supervised from ``labels.csv`` at train time; at sim time from ``SIM_TAKE_OFFRAMP`` /
+    ``SIM_TAKE_OFFRAMP_UPPER_HALF_NAV`` in ``config``).
     """
 
     def __init__(self):
@@ -81,6 +83,7 @@ class DrivingNet(nn.Module):
         Args:
             x: Input images shaped ``(N, 3, H, W)`` with ``H, W`` matching ``CAMERA_IMAGE_SIZE``.
             take_offramp: Per-sample intent ``(N,)`` or ``(N, 1)`` in ``{0, 1}``; if ``None``, uses zeros.
+                In ``simulate.py`` this mirrors CSV semantics and gates off-ramp merges when projection is on.
 
         Returns:
             Tensor of shape ``(N, MODEL_OUTPUT_DIM)``; steering for loss/sim is ``[..., 0]``.
