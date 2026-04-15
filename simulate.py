@@ -355,14 +355,23 @@ def _ego_lateral_offset_px_at_y(
     psi: float | None = None,
     *,
     on_ramp: bool = False,
+    w_bot_override: float | None = None,
+    skip_slow_bot: bool = False,
 ) -> float:
-    """Camera/ego offset from centerline (px); roadkill detour applies only on the main road."""
+    """Camera/ego offset from centerline (px); roadkill detour applies only on the main road.
+
+    ``w_bot_override``: if set, skip slow-bot lookup and use this blend weight (see
+    ``_world_bgr_composite_slow_bot_w``). ``skip_slow_bot``: omit bot (e.g. BEV trail-only).
+    """
     if on_ramp:
         base = float(cfg.offramp_camera_lateral_offset_px(dw.px_per_m))
     else:
         base = float(cfg.SIM_EGO_LATERAL_OFFSET_M) * float(dw.px_per_m)
-    w_bot = 0.0
-    if (
+    if w_bot_override is not None:
+        w_bot = float(np.clip(float(w_bot_override), 0.0, 1.0))
+    elif skip_slow_bot:
+        w_bot = 0.0
+    elif (
         bool(getattr(cfg, "BOT_CAR_ENABLE", False))
         and not on_ramp
         and world_bgr is not None
@@ -376,6 +385,8 @@ def _ego_lateral_offset_px_at_y(
         w_bot, _, _, _ = slow_bot_car_pass_blend_and_pose(
             float(y), dw, y_ref, r_lane
         )
+    else:
+        w_bot = 0.0
     return lateral_offset_px_avoid_roadkill(
         float(y),
         base,
@@ -389,31 +400,31 @@ def _ego_lateral_offset_px_at_y(
     )
 
 
-def _world_bgr_composite_slow_bot(
+def _world_bgr_composite_slow_bot_w(
     world_bgr: np.ndarray,
     dw: DrivingWorld,
     y: float,
     *,
     on_ramp: bool,
     map_h: int,
-) -> np.ndarray:
-    """Return ``world_bgr`` or a copy with the slow bot drawn (right lane, arc-length kinematics)."""
+) -> tuple[np.ndarray, float]:
+    """Map layer for FP/BEV plus slow-bot pass blend at ``y`` (reuse for lateral to avoid duplicate work)."""
     if on_ramp or not bool(getattr(cfg, "BOT_CAR_ENABLE", False)):
-        return world_bgr
+        return world_bgr, 0.0
     y_ref = float(map_h) - float(cfg.DATASET_MAP_MARGIN)
     r_lane = float(
         cfg.LANE_WIDTH_METERS
         * cfg.DATASET_RIGHT_LANE_LATERAL_FRAC
         * dw.px_per_m
     )
-    _w, qx, qy, ppsi = slow_bot_car_pass_blend_and_pose(
+    w_bot, qx, qy, ppsi = slow_bot_car_pass_blend_and_pose(
         float(y), dw, y_ref, r_lane
     )
     if qx is None:
-        return world_bgr
+        return world_bgr, 0.0
     out = world_bgr.copy()
     draw_slow_bot_car_bev(out, qx, qy, ppsi, float(dw.px_per_m))
-    return out
+    return out, float(w_bot)
 
 
 def _draw_lateral_sampling_bar(
@@ -449,7 +460,7 @@ def _draw_train_sampling_bars_on_bev(
         xc = float(dw.get_road_center(yf))
         psi = initial_heading_road_aligned(dw.cs, yf)
         lat = _ego_lateral_offset_px_at_y(
-            dw, yf, vis, float(xc), float(psi)
+            dw, yf, vis, float(xc), float(psi), skip_slow_bot=True
         )
         qx, qy = _right_lane_overlay_xy(xc, yf, psi, lat)
         _draw_lateral_sampling_bar(vis, qx, qy, psi, bar_half, yellow_bgr)
@@ -678,6 +689,7 @@ def _bev_realtime_frame(
     *,
     on_ramp: bool = False,
     map_h: int,
+    bot_visual_base: np.ndarray | None = None,
     extra_hint: str | None = None,
     nav_exit_active: bool = False,
     nav_exit_text: str = "take the next exit",
@@ -694,17 +706,26 @@ def _bev_realtime_frame(
     """
     # Static road/grass is ``world_bgr`` (built once in ``DrivingWorld``). Per frame we only composite
     # the moving bot (if any) and draw trail + ego on a writable buffer — no full map regeneration.
-    # ``_world_bgr_composite_slow_bot`` returns a fresh copy when it draws the bot; otherwise the same
-    # array reference, so copy only when we must not mutate the shared world.
-    bot_layer = _world_bgr_composite_slow_bot(
-        world_bgr, dw, float(y), on_ramp=on_ramp, map_h=map_h
-    )
+    if bot_visual_base is not None:
+        bot_layer = bot_visual_base
+    else:
+        bot_layer = _world_bgr_composite_slow_bot_w(
+            world_bgr, dw, float(y), on_ramp=on_ramp, map_h=map_h
+        )[0]
     vis = world_bgr.copy() if bot_layer is world_bgr else bot_layer
     if len(path) >= 2:
         n = len(path)
-        qs = np.empty((n, 2), dtype=np.float32)
-        for i, p in enumerate(path):
-            xc, yc, _psi, on_r, ur, rid = p
+        max_pts = int(getattr(cfg, "SIM_BEV_TRAIL_MAX_POINTS", 400))
+        if n > max_pts:
+            step_i = max(1, (n - 1) // (max_pts - 1))
+            idxs = list(range(0, n - 1, step_i))
+            if idxs[-1] != n - 1:
+                idxs.append(n - 1)
+        else:
+            idxs = list(range(n))
+        qs = np.empty((len(idxs), 2), dtype=np.float32)
+        for j, i in enumerate(idxs):
+            xc, yc, _psi, on_r, ur, rid = path[i]
             psi_d = _path_point_psi_draw(dw, xc, yc, on_r, ur, rid)
             lat_i = _ego_lateral_offset_px_at_y(
                 dw,
@@ -713,10 +734,11 @@ def _bev_realtime_frame(
                 float(xc),
                 float(psi_d),
                 on_ramp=bool(on_r),
+                skip_slow_bot=True,
             )
             qx, qy = _right_lane_overlay_xy(float(xc), float(yc), psi_d, lat_i)
-            qs[i, 0] = qx
-            qs[i, 1] = qy
+            qs[j, 0] = qx
+            qs[j, 1] = qy
         pts = qs.round().astype(np.int32).reshape(-1, 1, 2)
         cv2.polylines(vis, [pts], False, (200, 200, 255), 2, cv2.LINE_AA)
     qx, qy = _right_lane_overlay_xy(float(x), float(y), float(psi_draw), lateral_px)
@@ -1520,7 +1542,7 @@ def run_simulation() -> tuple[
                 psi_cam = float(np.arctan2(fy, fx))
             else:
                 psi_cam = initial_heading_road_aligned(dw.cs, y)
-            world_cam = _world_bgr_composite_slow_bot(
+            world_cam, w_bot_fp = _world_bgr_composite_slow_bot_w(
                 world, dw, float(y), on_ramp=on_ramp, map_h=h
             )
             view = get_view_from_pose(
@@ -1535,6 +1557,7 @@ def run_simulation() -> tuple[
                     float(x),
                     float(psi_cam),
                     on_ramp=on_ramp,
+                    w_bot_override=w_bot_fp,
                 ),
             )
             if view is None:
@@ -1640,6 +1663,9 @@ def run_simulation() -> tuple[
                 "margin": margin,
                 "ramp_kinematics": ramp_kinematics,
             }
+            world_cam_post, w_bot_post = _world_bgr_composite_slow_bot_w(
+                world, dw, float(y), on_ramp=on_ramp, map_h=h
+            )
             lat_hit = _ego_lateral_offset_px_at_y(
                 dw,
                 float(y),
@@ -1647,6 +1673,7 @@ def run_simulation() -> tuple[
                 float(x),
                 float(psi_draw),
                 on_ramp=on_ramp,
+                w_bot_override=w_bot_post,
             )
             qx_hit, qy_hit = _right_lane_overlay_xy(
                 float(x), float(y), float(psi_draw), lat_hit
@@ -1665,6 +1692,7 @@ def run_simulation() -> tuple[
                     lat_hit,
                     on_ramp=on_ramp,
                     map_h=h,
+                    bot_visual_base=world_cam_post,
                     nav_exit_active=_bev_nav_exit_active(float(y), h),
                     nav_exit_text=str(cfg.SIM_NAV_EXIT_INSTRUCTION_TEXT),
                     show_step_hud=False,
@@ -1693,13 +1721,7 @@ def run_simulation() -> tuple[
             if live_bev or live_drv:
                 try:
                     view_live = get_view_from_pose(
-                        _world_bgr_composite_slow_bot(
-                            world,
-                            dw,
-                            float(y),
-                            on_ramp=on_ramp,
-                            map_h=h,
-                        ),
+                        world_cam_post,
                         x,
                         y,
                         psi_draw,
@@ -1781,6 +1803,15 @@ def run_simulation() -> tuple[
                                     ramp_id=ramp_id,
                                 )
                             )
+                            world_cam_post, w_bot_post = (
+                                _world_bgr_composite_slow_bot_w(
+                                    world,
+                                    dw,
+                                    float(y),
+                                    on_ramp=on_ramp,
+                                    map_h=h,
+                                )
+                            )
                             lat_hit = _ego_lateral_offset_px_at_y(
                                 dw,
                                 float(y),
@@ -1788,6 +1819,7 @@ def run_simulation() -> tuple[
                                 float(x),
                                 float(psi_draw),
                                 on_ramp=on_ramp,
+                                w_bot_override=w_bot_post,
                             )
                             qx_hit, qy_hit = _right_lane_overlay_xy(
                                 float(x), float(y), float(psi_draw), lat_hit
@@ -1815,6 +1847,7 @@ def run_simulation() -> tuple[
                                     lat_hit,
                                     on_ramp=on_ramp,
                                     map_h=h,
+                                    bot_visual_base=world_cam_post,
                                     extra_hint=bh,
                                     nav_exit_active=_bev_nav_exit_active(float(y), h),
                                     nav_exit_text=str(
@@ -1823,13 +1856,7 @@ def run_simulation() -> tuple[
                                 )
                                 _rt_draw_speed_slider(fr, rt_ui)
                             view_live = get_view_from_pose(
-                                _world_bgr_composite_slow_bot(
-                                    world,
-                                    dw,
-                                    float(y),
-                                    on_ramp=on_ramp,
-                                    map_h=h,
-                                ),
+                                world_cam_post,
                                 x,
                                 y,
                                 psi_draw,
@@ -1846,21 +1873,32 @@ def run_simulation() -> tuple[
                         disp_psi_draw = float(psi_draw)
                         disp_lat = lat_hit
                         prv = rt_ui.get("reloc_preview_pose")
+                        on_ramp_for_bev = on_ramp
+                        if paused and isinstance(prv, dict) and rt_ui.get("ego_drag"):
+                            on_ramp_for_bev = bool(prv.get("on_ramp", False))
+                        disp_bev_base: np.ndarray | None = None
                         if paused and isinstance(prv, dict) and rt_ui.get("ego_drag"):
                             disp_x = float(prv["x"])
                             disp_y = float(prv["y"])
                             disp_psi_draw = float(prv["psi"])
+                            disp_bev_base, w_bot_pv = _world_bgr_composite_slow_bot_w(
+                                world,
+                                dw,
+                                float(disp_y),
+                                on_ramp=on_ramp_for_bev,
+                                map_h=h,
+                            )
                             disp_lat = _ego_lateral_offset_px_at_y(
                                 dw,
                                 disp_y,
                                 world,
                                 disp_x,
                                 disp_psi_draw,
-                                on_ramp=bool(prv.get("on_ramp", False)),
+                                on_ramp=on_ramp_for_bev,
+                                w_bot_override=w_bot_pv,
                             )
-                        on_ramp_for_bev = on_ramp
-                        if paused and isinstance(prv, dict) and rt_ui.get("ego_drag"):
-                            on_ramp_for_bev = bool(prv.get("on_ramp", False))
+                        elif fr is not None:
+                            disp_bev_base = world_cam_post
                         if fr is not None:
                             bh = (
                                 "PAUSED: drag ego car to move, release on road"
@@ -1877,6 +1915,7 @@ def run_simulation() -> tuple[
                                 disp_lat,
                                 on_ramp=on_ramp_for_bev,
                                 map_h=h,
+                                bot_visual_base=disp_bev_base,
                                 extra_hint=bh,
                                 nav_exit_active=_bev_nav_exit_active(
                                     float(disp_y), h

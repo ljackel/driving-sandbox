@@ -196,9 +196,9 @@ ROADKILL_ALONG_MAX_LANE_WIDTHS = 2.2
 # ``BOT_CAR_START_FRAC_FROM_BOTTOM`` × full centerline arc to ``DATASET_MAP_MARGIN`` (keeps bot clear of
 # low-``y`` roadkill), plus optional ``BOT_CAR_HEAD_START_M``. Then ``BOT_CAR_REL_SPEED`` × ego arc so ego catches up.
 BOT_CAR_ENABLE = True
-BOT_CAR_START_FRAC_FROM_BOTTOM = 1.0 / 3.0
+BOT_CAR_START_FRAC_FROM_BOTTOM =  .25
 BOT_CAR_HEAD_START_M = 0.0
-BOT_CAR_REL_SPEED = 0.5
+BOT_CAR_REL_SPEED = 0.2
 # Arc-length windows (meters → px in code) for raised-cosine pass / merge-back weights vs ``σ_bot − σ_ego``.
 BOT_CAR_PASS_INFLUENCE_ARC_M = 92.0
 BOT_CAR_CORE_ARC_M = 16.0
@@ -472,6 +472,8 @@ SIM_START_MAX_INSET_PX = 200
 SIM_FP_VIDEO_FILENAME = "sim_first_person.mp4"
 # Bird's-eye MP4 every run (``WORLD_IMAGE_SIZE`` square, trail + ego + optional nav box); same FPS as first-person.
 SIM_BEV_VIDEO_FILENAME = "sim_bev.mp4"
+# Cap polyline vertices for the BEV trail (subsamples long paths; speeds ``_bev_realtime_frame``).
+SIM_BEV_TRAIL_MAX_POINTS = 384
 # Playback speed matches one simulation step per frame (``1 / SIM_DT``).
 SIM_VIDEO_FPS = 1.0 / SIM_DT
 # ``SIM_REALTIME_BEV`` / ``SIM_REALTIME_DRIVER_VIEW``: set by ``MAX_SIM_SPEED`` / ``_CUSTOM_SIM_*`` at top.
