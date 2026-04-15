@@ -1354,11 +1354,50 @@ def run_simulation() -> tuple[
         _prev_sigint = None
 
     try:
+        # When writing MP4s and using live windows, initialize OpenCV highgui before any
+        # VideoWriter so the GUI backend is ready first (avoids live display failing or Qt
+        # thread warnings on some Linux/OpenCV builds).
+        if (cfg.SIM_FP_VIDEO_ENABLE or cfg.SIM_BEV_VIDEO_ENABLE) and (
+            cfg.SIM_REALTIME_BEV or cfg.SIM_REALTIME_DRIVER_VIEW
+        ):
+            try:
+                cv2.startWindowThread()
+            except Exception:
+                pass
+            try:
+                z = np.zeros((2, 2, 3), dtype=np.uint8)
+                if cfg.SIM_REALTIME_BEV:
+                    cv2.namedWindow(
+                        cfg.SIM_REALTIME_BEV_WINDOW, cv2.WINDOW_NORMAL
+                    )
+                    cv2.imshow(cfg.SIM_REALTIME_BEV_WINDOW, z)
+                if cfg.SIM_REALTIME_DRIVER_VIEW:
+                    cv2.namedWindow(
+                        cfg.SIM_REALTIME_DRIVER_WINDOW, cv2.WINDOW_NORMAL
+                    )
+                    cv2.imshow(cfg.SIM_REALTIME_DRIVER_WINDOW, z)
+                cv2.waitKey(1)
+            except cv2.error:
+                if not rt_gui_disabled:
+                    print(
+                        "Warning: live display failed (no GUI / OpenCV backend?). "
+                        "Set SIM_REALTIME_BEV / SIM_REALTIME_DRIVER_VIEW False in config.py. "
+                        "Disabling for this run.",
+                        file=sys.stderr,
+                    )
+                rt_gui_disabled = True
+
         for sim_i in range(cfg.SIM_MAX_STEPS):
             if interrupt_rt[0]:
                 user_quit_rt = True
                 break
             rt_ui["sim_step"] = sim_i
+            t_sim = float(sim_i) * float(cfg.SIM_DT)
+            print(
+                f"\rsimulation step {sim_i}  (sim time {t_sim:.3f} s)",
+                end="",
+                flush=True,
+            )
             step_dist_px = base_step_dist_px * float(rt_ui.get("speed_scale", 1.0))
             y_for_model = float(y)
             if cfg.SIM_TAKE_OFFRAMP_UPPER_HALF_NAV:
@@ -1786,7 +1825,8 @@ def run_simulation() -> tuple[
                         print(
                             "Warning: live display failed (no GUI / OpenCV backend?). "
                             "Set SIM_REALTIME_BEV / SIM_REALTIME_DRIVER_VIEW False in config.py. "
-                            "Disabling for this run."
+                            "Disabling for this run.",
+                            file=sys.stderr,
                         )
                     rt_gui_disabled = True
                     if rt_window:
@@ -1808,6 +1848,7 @@ def run_simulation() -> tuple[
                 break
             if x < 0 or x >= w or y < 0 or float(y) >= float(h):
                 break
+        print()
     finally:
         if _prev_sigint is not None:
             signal.signal(signal.SIGINT, _prev_sigint)
