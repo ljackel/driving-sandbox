@@ -205,7 +205,10 @@ BOT_CAR_REL_SPEED = 0.2
 BOT_CAR_PASS_INFLUENCE_ARC_M = 92.0
 BOT_CAR_CORE_ARC_M = 16.0
 BOT_CAR_EXIT_ARC_M = 36.0
-# BEV slow-bot footprint vs ego: ``1.0`` = same width as ``SIM_BEV_EGO_CAR_WIDTH_M`` (shared draw path).
+# Slow-bot width in **perspective / dataset warps**: true BEV geometry scale (no map min-length boost).
+# ``1.0`` = ``SIM_BEV_EGO_CAR_WIDTH_M`` × length; lower if training crops still look wide.
+BOT_CAR_WARP_WIDTH_SCALE = 1.0
+# Slow-bot width on **BEV map / realtime bird's-eye** only (``for_map_display`` ego icon rules).
 BOT_CAR_BEV_WIDTH_SCALE = 1.0
 # Arc-length quadrature for slow-bot kinematics (``slow_bot_car_pass_blend_and_pose``). Lower = faster in
 # sim / BEV trail; dataset spacing and other arc uses still default to ~2000 samples.
@@ -214,6 +217,16 @@ SIM_SLOW_BOT_Y_AT_ARC_ITER = 36
 # Inverse arc-length solve: Newton steps when a previous bot row is known; then bisection if needed.
 SIM_SLOW_BOT_ARC_NEWTON_MAX = 10
 SIM_SLOW_BOT_ARC_NEWTON_TOL_PX = 0.25
+# **Convoy** (extra slow traffic in the **right lane**): same arc odometer as the lead slow bot
+# (``BOT_CAR_REL_SPEED``, ``BOT_CAR_START_FRAC_FROM_BOTTOM``, etc.) via ``slow_bot_sigma_b_odom``, with
+# fixed arc offsets (px) **behind** that lead. Pass / label blending uses the same raised-cosine as the
+# slow bot (left-lane pass), taking the max over convoy vehicles.
+BOT_CONVOY_ENABLE = True
+BOT_CONVOY_COUNT = 3
+# Arc (px) added to lead ``sigma_b``; negative = toward map bottom / behind the lead slow bot.
+BOT_CONVOY_ARC_OFFSET_FROM_LEAD_PX = (-72.0, -144.0, -216.0)
+# When convoy is enabled (non-empty offsets), simulation step uses this speed (m/s) if not ``None``.
+BOT_CONVOY_EGO_SPEED_M_S = 28.0
 # Off-ramp geometry (see ``OFFRAMP_ENABLE`` in switches): branch on main centerline; image-row fraction
 # (0 = top, 1 = bottom). Must be > 0.5 for bottom-half exit; ignored otherwise.
 OFFRAMP_BRANCH_Y_FRAC = 0.78
@@ -474,19 +487,24 @@ def offramp_camera_lateral_offset_px(px_per_m: float) -> float:
 # Live BEV / ``sim_path.png`` (written under ``runs/<timestamp>_sim/``): top-down ego footprint (meters, full scale on the map).
 SIM_BEV_EGO_CAR_WIDTH_M = 1.5
 SIM_BEV_EGO_CAR_LENGTH_M = 3.0
-# If the true size in pixels is smaller than this length (px), scale the icon up uniformly
-# (keeps 1.5 m × 3 m proportions; set0 to always use exact map scale).
+# If the true vehicle **length** in px is below this, the icon is scaled up **uniformly** (keeps 3 m : 1.5 m)
+# until length reaches this minimum, then width is capped to ``SIM_BEV_EGO_MAX_WIDTH_FRAC_OF_LANE`` × one lane
+# so cars stay inside a 4 m lane. Set 0 for exact map scale only (often tiny).
 SIM_BEV_EGO_CAR_MIN_DISPLAY_LEN_PX = 22.0
+# After min-length scaling, shrink length and width together if width would exceed this × ``LANE_WIDTH_METERS``.
+SIM_BEV_EGO_MAX_WIDTH_FRAC_OF_LANE = 0.88
 # Start as low as possible: try y = h-1, then move up until perspective warp fits.
 SIM_START_MAX_INSET_PX = 200
 # First-person MP4 written every ``simulate`` run under ``runs/<timestamp>_sim/`` (``CAMERA_IMAGE_SIZE``).
 SIM_FP_VIDEO_FILENAME = "sim_first_person.mp4"
 # Bird's-eye MP4 every run (``WORLD_IMAGE_SIZE`` square, trail + ego + optional nav box); same FPS as first-person.
 SIM_BEV_VIDEO_FILENAME = "sim_bev.mp4"
+# After ``simulate.py`` finishes (``main``), open ``SIM_BEV_VIDEO_FILENAME`` in the default video player.
+SIM_PLAY_BEV_MP4_WHEN_DONE = True
 # Final bird's-eye PNG after a run: full pink trail + ego at last pose (matches live BEV, not ``sim_path.png``).
 SIM_BEV_PATH_IMAGE_FILENAME = "sim_bev_path.png"
-# Cap polyline vertices for the BEV trail (each vertex runs roadkill + optional slow-bot lateral).
-# Lower = faster; raise for a smoother trail on long runs.
+# Cap polyline vertices when **drawing** the BEV trail (subsampling cached right-lane points). The sim loop
+# only computes **one** new trail vertex per step; lower this for lighter ``polylines`` / smaller MP4 writes.
 SIM_BEV_TRAIL_MAX_POINTS = 160
 # When False, trail lateral skips slow-bot blend (cheaper; trail may not show pass-around geometry).
 SIM_BEV_TRAIL_INCLUDE_SLOW_BOT = True

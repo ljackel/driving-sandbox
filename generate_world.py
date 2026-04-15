@@ -335,17 +335,32 @@ def bev_topdown_car_extent_px(
     px_per_m: float,
     *,
     width_scale: float = 1.0,
+    for_map_display: bool = True,
 ) -> tuple[float, float]:
-    """Length × width (px) for BEV top-down car icons; same basis as ``SIM_BEV_EGO_CAR_*``."""
+    """Length × width (px) for BEV top-down car icons; same basis as ``SIM_BEV_EGO_CAR_*``.
+
+    ``for_map_display``: when true (live BEV ego icon), apply min pixel length + lane width cap so the
+    vehicle stays visible on the map. When false (slow-bot drawn for dataset / FP warp source), use true
+    ``SIM_BEV_EGO_CAR_*`` meters × ``px_per_m`` only so warped training and MP4 footage are not bloated.
+    """
     len_px = float(cfg.SIM_BEV_EGO_CAR_LENGTH_M) * float(px_per_m)
     wid_px = (
         float(cfg.SIM_BEV_EGO_CAR_WIDTH_M) * float(px_per_m) * float(width_scale)
     )
+    if not for_map_display:
+        return len_px, wid_px
     mn = float(cfg.SIM_BEV_EGO_CAR_MIN_DISPLAY_LEN_PX)
     if mn > 0.0 and len_px < mn:
-        s = mn / max(len_px, 1e-6)
+        s = float(mn) / max(len_px, 1e-6)
         len_px *= s
         wid_px *= s
+    max_wid = float(
+        getattr(cfg, "SIM_BEV_EGO_MAX_WIDTH_FRAC_OF_LANE", 0.88)
+    ) * float(cfg.LANE_WIDTH_METERS * float(px_per_m))
+    if wid_px > max_wid > 0.0:
+        cap = max_wid / wid_px
+        len_px *= cap
+        wid_px = max_wid
     return len_px, wid_px
 
 
@@ -360,9 +375,12 @@ def draw_bev_topdown_car(
     outline_bgr: tuple[int, int, int],
     axis_bgr: tuple[int, int, int],
     width_scale: float = 1.0,
+    for_map_display: bool = True,
 ) -> None:
     """In-place BEV vehicle: fill, 1px outline, hood line (shared by ego and slow-bot)."""
-    len_px, wid_px = bev_topdown_car_extent_px(px_per_m, width_scale=width_scale)
+    len_px, wid_px = bev_topdown_car_extent_px(
+        px_per_m, width_scale=width_scale, for_map_display=for_map_display
+    )
     poly = _bev_car_polygon_int32(cx, cy, psi, len_px, wid_px)
     cv2.fillConvexPoly(world_bgr, poly, body_bgr)
     cv2.polylines(world_bgr, [poly], True, outline_bgr, 1, cv2.LINE_AA)
@@ -388,19 +406,41 @@ def draw_slow_bot_car_bev(
     cy: float,
     psi: float,
     px_per_m: float,
+    *,
+    for_perspective_warp: bool = False,
 ) -> None:
-    """In-place top-down bot vehicle (distinct color); same width/length as ego BEV icon."""
-    draw_bev_topdown_car(
-        world_bgr,
-        cx,
-        cy,
-        psi,
-        px_per_m,
-        body_bgr=(55, 75, 220),
-        outline_bgr=(255, 255, 255),
-        axis_bgr=(180, 200, 255),
-        width_scale=float(cfg.BOT_CAR_BEV_WIDTH_SCALE),
-    )
+    """In-place top-down slow-bot (distinct color).
+
+    ``for_perspective_warp=True``: true scale for homography / training crops
+    (``BOT_CAR_WARP_WIDTH_SCALE``, no map min-length boost). ``False``: map/BEV icon
+    rules (``BOT_CAR_BEV_WIDTH_SCALE``, ``for_map_display``).
+    """
+    if for_perspective_warp:
+        draw_bev_topdown_car(
+            world_bgr,
+            cx,
+            cy,
+            psi,
+            px_per_m,
+            body_bgr=(55, 75, 220),
+            outline_bgr=(255, 255, 255),
+            axis_bgr=(180, 200, 255),
+            width_scale=float(cfg.BOT_CAR_WARP_WIDTH_SCALE),
+            for_map_display=False,
+        )
+    else:
+        draw_bev_topdown_car(
+            world_bgr,
+            cx,
+            cy,
+            psi,
+            px_per_m,
+            body_bgr=(55, 75, 220),
+            outline_bgr=(255, 255, 255),
+            axis_bgr=(180, 200, 255),
+            width_scale=float(cfg.BOT_CAR_BEV_WIDTH_SCALE),
+            for_map_display=True,
+        )
 
 
 def _slow_bot_pass_blend_weight(gap_sigma_px: float, px_per_m: float) -> float:
@@ -425,6 +465,118 @@ def _slow_bot_pass_blend_weight(gap_sigma_px: float, px_per_m: float) -> float:
         return 1.0
     t = (far_px - gap) / max(far_px - near_px, 1e-6)
     return float(_raised_cosine01(t))
+
+
+def _convoy_left_lane_bot_specs(
+    dw: DrivingWorld,
+) -> list[tuple[float, float, float, float, float]]:
+    """
+    Static left-lane cars: ``(sigma_to_y_ref, y_row, qx, qy, psi)`` each, or empty if disabled / layout
+    missing. ``sigma`` is arc length along the centerline from ``y_row`` to ``y_ref = size - DATASET_MAP_MARGIN``
+    (same odometer as ``slow_bot_car_pass_blend_and_pose``).
+    """
+    if not bool(getattr(cfg, "BOT_CONVOY_ENABLE", False)):
+        return []
+    if not bool(getattr(cfg, "OFFRAMP_ENABLE", False)):
+        return []
+    branches = dw.offramp_branch_y_pxs()
+    min_r = int(getattr(cfg, "BOT_CONVOY_MIN_OFFRAMPS", 2))
+    if len(branches) < min_r:
+        return []
+    idx = int(getattr(cfg, "BOT_CONVOY_AFTER_OFFRAMP_INDEX", 1))
+    if idx < 0 or idx >= len(branches):
+        return []
+    y_branch = float(branches[idx])
+    h = float(dw.size)
+    y_top = float(cfg.DATASET_MAP_MARGIN)
+    gap_below = float(getattr(cfg, "BOT_CONVOY_Y_GAP_PX_BELOW_BRANCH", 18.0))
+    y_lo = y_branch + gap_below
+    gap_above_prev = float(
+        getattr(cfg, "BOT_CONVOY_Y_GAP_PX_ABOVE_PREV_BRANCH", 22.0)
+    )
+    pad_top = float(getattr(cfg, "BOT_CONVOY_Y_PAD_TOP", 12.0))
+    if idx > 0:
+        y_hi = float(branches[idx - 1]) - gap_above_prev
+    else:
+        frac_fb = float(getattr(cfg, "BOT_CONVOY_FALLBACK_MAX_Y_FRAC", 0.48))
+        y_hi = frac_fb * h - pad_top
+    if y_hi <= y_lo + 5.0:
+        return []
+    n = int(getattr(cfg, "BOT_CONVOY_COUNT", 3))
+    if n <= 0:
+        return []
+    inset = float(getattr(cfg, "BOT_CONVOY_Y_SPREAD_INSET_FRAC", 0.08))
+    span = y_hi - y_lo
+    y_a = y_lo + inset * span
+    y_b = y_hi - inset * span
+    if y_b <= y_a + 1.0:
+        y_a, y_b = y_lo, y_hi
+    y_rows = np.linspace(y_a, y_b, n, dtype=np.float64)
+    y_ref_bottom = float(dw.size) - float(cfg.DATASET_MAP_MARGIN)
+    arc_nf = int(getattr(cfg, "SIM_SLOW_BOT_ARC_N_FINE", 320))
+    lane_off = float(
+        cfg.LANE_WIDTH_METERS
+        * cfg.DATASET_RIGHT_LANE_LATERAL_FRAC
+        * dw.px_per_m
+    )
+    out: list[tuple[float, float, float, float, float]] = []
+    for yr in y_rows:
+        yr = float(yr)
+        if yr < y_top or yr > float(dw.size) - 1.0:
+            continue
+        sigma = centerline_arc_length_between_rows(
+            dw.cs, yr, y_ref_bottom, n_fine=arc_nf
+        )
+        x_c = float(dw.get_road_center(yr))
+        dxdY = float(dw.cs(yr, nu=1))
+        psi = _psi_road_from_dxdY(dxdY)
+        qx, qy = _right_lane_bev_xy(x_c, yr, psi, -lane_off)
+        out.append((float(sigma), yr, float(qx), float(qy), psi))
+    return out
+
+
+def convoy_left_lane_has_layout(dw: DrivingWorld) -> bool:
+    """True if ``BOT_CONVOY_ENABLE`` and at least one convoy car is placed on this world."""
+    return len(_convoy_left_lane_bot_specs(dw)) > 0
+
+
+def convoy_left_lane_pass_weight(
+    y_ego: float,
+    dw: DrivingWorld,
+    y_ref_bottom: float,
+    px_per_m: float,
+) -> float:
+    """Max arc-window blend vs ego for static left-lane convoy (merge-right curriculum)."""
+    specs = _convoy_left_lane_bot_specs(dw)
+    if not specs:
+        return 0.0
+    arc_nf = int(getattr(cfg, "SIM_SLOW_BOT_ARC_N_FINE", 320))
+    sigma_e_ref = centerline_arc_length_between_rows(
+        dw.cs, float(y_ego), float(y_ref_bottom), n_fine=arc_nf
+    )
+    w_max = 0.0
+    for sigma_b, *_ in specs:
+        gap = float(sigma_b - sigma_e_ref)
+        w_max = max(w_max, _slow_bot_pass_blend_weight(gap, px_per_m))
+    return float(w_max)
+
+
+def draw_convoy_left_lane_bots_bev(
+    world_bgr: np.ndarray,
+    dw: DrivingWorld,
+    *,
+    for_perspective_warp: bool = False,
+) -> None:
+    """Draw all convoy cars (same art as slow bot)."""
+    for _s, _yr, qx, qy, psi in _convoy_left_lane_bot_specs(dw):
+        draw_slow_bot_car_bev(
+            world_bgr,
+            qx,
+            qy,
+            psi,
+            float(dw.px_per_m),
+            for_perspective_warp=for_perspective_warp,
+        )
 
 
 def slow_bot_car_pass_blend_and_pose(
@@ -530,12 +682,15 @@ def lateral_offset_px_avoid_roadkill(
     psi: float | None = None,
     on_main_road: bool = True,
     extra_left_lane_blend: float = 0.0,
+    extra_merge_right_blend: float = 0.0,
 ) -> float:
     """
     Signed lateral offset (px) along driver's right: nominal right-lane center, or mirrored left-lane
     when passing the roadkill band (smooth ramps).
 
     ``extra_left_lane_blend`` (e.g. slow bot passing) is merged with ``max(w_roadkill, w_extra)``.
+    ``extra_merge_right_blend`` (e.g. left-lane convoy) pulls the result toward the **right** lane after
+    that merge.
 
     Roadkill splats live on the **main** road only; set ``on_main_road=False`` for off-ramp poses
     (matches ``generate_dataset`` off-ramp crops, which use a fixed right-lane offset).
@@ -575,8 +730,10 @@ def lateral_offset_px_avoid_roadkill(
         else:
             w = roadkill_left_lane_blend_weight(y_row)
     w_x = float(np.clip(float(extra_left_lane_blend), 0.0, 1.0))
+    w_mr = float(np.clip(float(extra_merge_right_blend), 0.0, 1.0))
     w_eff = max(w, w_x)
-    return (1.0 - w_eff) * r + w_eff * (-r)
+    lat_mid = (1.0 - w_eff) * r + w_eff * (-r)
+    return (1.0 - w_mr) * lat_mid + w_mr * r
 
 
 def _bezier_quadratic_xy_d1_d2(
@@ -1058,6 +1215,8 @@ class DrivingWorld:
             off = self._offramp_bezier_polyline_int(ctrl)
             if len(off) >= 2:
                 if getattr(cfg, "OFFRAMP_SINGLE_LANE", False):
+                    # ``_draw_road_polyline`` uses thickness = 2 × ``lane_px``; half of main-road ``lane_px``
+                    # gives one ``LANE_WIDTH_METERS`` stripe on the ramp (main road = two lanes).
                     lane_px_off = max(1, int(lane_px) // 2)
                     self._draw_road_polyline(
                         world,

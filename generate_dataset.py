@@ -26,6 +26,9 @@ from dataset_split import (
 )
 from generate_world import (
     DrivingWorld,
+    convoy_left_lane_has_layout,
+    convoy_left_lane_pass_weight,
+    draw_convoy_left_lane_bots_bev,
     draw_slow_bot_car_bev,
     lateral_offset_px_avoid_roadkill,
     slow_bot_car_pass_blend_and_pose,
@@ -328,10 +331,28 @@ def _world_main_road_with_bot_and_lateral(
     w_bot, qx, qy, ppsi, _ = slow_bot_car_pass_blend_and_pose(
         float(yf), dw, y_ref, right_lane_offset_px
     )
+    w_convoy = convoy_left_lane_pass_weight(
+        float(yf), dw, y_ref, float(dw.px_per_m)
+    )
+    has_convoy_draw = bool(getattr(cfg, "BOT_CONVOY_ENABLE", False)) and convoy_left_lane_has_layout(
+        dw
+    )
     world_use = world
-    if qx is not None:
+    if qx is not None or has_convoy_draw:
         world_use = world.copy()
-        draw_slow_bot_car_bev(world_use, qx, qy, ppsi, float(dw.px_per_m))
+        if qx is not None:
+            draw_slow_bot_car_bev(
+                world_use,
+                qx,
+                qy,
+                ppsi,
+                float(dw.px_per_m),
+                for_perspective_warp=True,
+            )
+        if has_convoy_draw:
+            draw_convoy_left_lane_bots_bev(
+                world_use, dw, for_perspective_warp=True
+            )
     lat_px = lateral_offset_px_avoid_roadkill(
         float(yf),
         right_lane_offset_px,
@@ -341,6 +362,7 @@ def _world_main_road_with_bot_and_lateral(
         x_center=float(road_x),
         psi=psi_road,
         extra_left_lane_blend=w_bot,
+        extra_merge_right_blend=w_convoy,
     )
     return world_use, lat_px
 
@@ -381,6 +403,10 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES, num_test=cfg.NUM_TEST_FRAMES):
     **Slow bot:** when ``BOT_CAR_ENABLE``, main-road frames composite a slower vehicle in the right lane
     ahead (``BOT_CAR_START_FRAC_FROM_BOTTOM``, ``BOT_CAR_REL_SPEED`` vs ego arc from map bottom); lateral labels use
     ``max(roadkill, pass)`` like an extra left-lane curriculum (κ still from centerline at ``y``).
+
+    **Convoy:** when ``BOT_CONVOY_ENABLE`` and there are enough off-ramp branches, static left-lane cars are
+    drawn on the main road between the second and first branch rows; labels add merge-right blending
+    (``convoy_left_lane_pass_weight``).
 
     **Off-ramp:** when ``OFFRAMP_ENABLE`` and ``DATASET_OFFRAMP_LABELS_ENABLE``, also writes
     ``train/offramp_*.jpg`` / ``test/offramp_*.jpg`` with ``take_offramp=1`` and κ from the Bézier.
