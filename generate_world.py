@@ -467,108 +467,196 @@ def _slow_bot_pass_blend_weight(gap_sigma_px: float, px_per_m: float) -> float:
     return float(_raised_cosine01(t))
 
 
-def _convoy_left_lane_bot_specs(
+def _slow_bot_sigma_start_reference(
     dw: DrivingWorld,
-) -> list[tuple[float, float, float, float, float]]:
+    y_ref_bottom: float,
+    *,
+    n_fine: int,
+) -> float:
     """
-    Static left-lane cars: ``(sigma_to_y_ref, y_row, qx, qy, psi)`` each, or empty if disabled / layout
-    missing. ``sigma`` is arc length along the centerline from ``y_row`` to ``y_ref = size - DATASET_MAP_MARGIN``
-    (same odometer as ``slow_bot_car_pass_blend_and_pose``).
+    Arc (px) from a reference centerline row to ``y_ref_bottom``, plus ``BOT_CAR_HEAD_START_M`` in px.
+
+    With ``BOT_CAR_ANCHOR_TO_OFFRAMP_ENABLE``, the row is just below the chosen off-ramp branch; otherwise
+    ``BOT_CAR_START_FRAC_FROM_BOTTOM`` × full arc to the map top inset.
     """
-    if not bool(getattr(cfg, "BOT_CONVOY_ENABLE", False)):
-        return []
-    if not bool(getattr(cfg, "OFFRAMP_ENABLE", False)):
-        return []
-    branches = dw.offramp_branch_y_pxs()
-    min_r = int(getattr(cfg, "BOT_CONVOY_MIN_OFFRAMPS", 2))
-    if len(branches) < min_r:
-        return []
-    idx = int(getattr(cfg, "BOT_CONVOY_AFTER_OFFRAMP_INDEX", 1))
-    if idx < 0 or idx >= len(branches):
-        return []
-    y_branch = float(branches[idx])
-    h = float(dw.size)
     y_top = float(cfg.DATASET_MAP_MARGIN)
-    gap_below = float(getattr(cfg, "BOT_CONVOY_Y_GAP_PX_BELOW_BRANCH", 18.0))
-    y_lo = y_branch + gap_below
-    gap_above_prev = float(
-        getattr(cfg, "BOT_CONVOY_Y_GAP_PX_ABOVE_PREV_BRANCH", 22.0)
+    head_px = float(cfg.BOT_CAR_HEAD_START_M) * float(dw.px_per_m)
+    s_full = centerline_arc_length_between_rows(
+        dw.cs, y_top, float(y_ref_bottom), n_fine=n_fine
     )
-    pad_top = float(getattr(cfg, "BOT_CONVOY_Y_PAD_TOP", 12.0))
-    if idx > 0:
-        y_hi = float(branches[idx - 1]) - gap_above_prev
-    else:
-        frac_fb = float(getattr(cfg, "BOT_CONVOY_FALLBACK_MAX_Y_FRAC", 0.48))
-        y_hi = frac_fb * h - pad_top
-    if y_hi <= y_lo + 5.0:
-        return []
-    n = int(getattr(cfg, "BOT_CONVOY_COUNT", 3))
-    if n <= 0:
-        return []
-    inset = float(getattr(cfg, "BOT_CONVOY_Y_SPREAD_INSET_FRAC", 0.08))
-    span = y_hi - y_lo
-    y_a = y_lo + inset * span
-    y_b = y_hi - inset * span
-    if y_b <= y_a + 1.0:
-        y_a, y_b = y_lo, y_hi
-    y_rows = np.linspace(y_a, y_b, n, dtype=np.float64)
-    y_ref_bottom = float(dw.size) - float(cfg.DATASET_MAP_MARGIN)
-    arc_nf = int(getattr(cfg, "SIM_SLOW_BOT_ARC_N_FINE", 320))
-    lane_off = float(
-        cfg.LANE_WIDTH_METERS
-        * cfg.DATASET_RIGHT_LANE_LATERAL_FRAC
-        * dw.px_per_m
-    )
-    out: list[tuple[float, float, float, float, float]] = []
-    for yr in y_rows:
-        yr = float(yr)
-        if yr < y_top or yr > float(dw.size) - 1.0:
-            continue
-        sigma = centerline_arc_length_between_rows(
-            dw.cs, yr, y_ref_bottom, n_fine=arc_nf
+    if bool(getattr(cfg, "BOT_CAR_ANCHOR_TO_OFFRAMP_ENABLE", False)) and bool(
+        getattr(cfg, "OFFRAMP_ENABLE", False)
+    ):
+        branches = dw.offramp_branch_y_pxs()
+        idx = int(getattr(cfg, "BOT_CAR_ANCHOR_OFFRAMP_INDEX", 1))
+        if 0 <= idx < len(branches):
+            y_branch = float(branches[idx])
+            gap = float(
+                getattr(cfg, "BOT_CAR_ANCHOR_Y_OFFSET_PX_BELOW_BRANCH", 20.0)
+            )
+            y_anchor = float(
+                np.clip(y_branch + gap, y_top, float(dw.size) - 1.0)
+            )
+            sigma_anchor = centerline_arc_length_between_rows(
+                dw.cs, y_anchor, float(y_ref_bottom), n_fine=n_fine
+            )
+            return float(sigma_anchor) + head_px
+    frac = float(
+        np.clip(
+            float(getattr(cfg, "BOT_CAR_START_FRAC_FROM_BOTTOM", 1.0 / 3.0)),
+            0.0,
+            0.999,
         )
-        x_c = float(dw.get_road_center(yr))
-        dxdY = float(dw.cs(yr, nu=1))
-        psi = _psi_road_from_dxdY(dxdY)
-        qx, qy = _right_lane_bev_xy(x_c, yr, psi, -lane_off)
-        out.append((float(sigma), yr, float(qx), float(qy), psi))
-    return out
+    )
+    return frac * float(s_full) + head_px
 
 
-def convoy_left_lane_has_layout(dw: DrivingWorld) -> bool:
-    """True if ``BOT_CONVOY_ENABLE`` and at least one convoy car is placed on this world."""
-    return len(_convoy_left_lane_bot_specs(dw)) > 0
+def slow_bot_sigma_b_odom(
+    y_ego: float,
+    dw: DrivingWorld,
+    y_ref_bottom: float,
+    *,
+    n_fine: int | None = None,
+) -> float:
+    """
+    Lead slow-bot arc ``sigma_b`` (px along centerline to ``y_ref_bottom``). Same kinematics as
+    ``slow_bot_car_pass_blend_and_pose`` but does not check ``BOT_CAR_ENABLE`` (used by convoy).
+    """
+    arc_nf = int(
+        n_fine if n_fine is not None else getattr(cfg, "SIM_SLOW_BOT_ARC_N_FINE", 320)
+    )
+    rel = float(cfg.BOT_CAR_REL_SPEED)
+    sigma_start = _slow_bot_sigma_start_reference(
+        dw, float(y_ref_bottom), n_fine=arc_nf
+    )
+    y_odom_bottom = float(y_ref_bottom) + float(cfg.DATASET_MAP_MARGIN) - 1.0
+    d_odom = centerline_arc_length_between_rows(
+        dw.cs, float(y_ref_bottom), y_odom_bottom, n_fine=arc_nf
+    )
+    sigma_e_ref = centerline_arc_length_between_rows(
+        dw.cs, float(y_ego), float(y_ref_bottom), n_fine=arc_nf
+    )
+    if float(y_ego) > float(y_ref_bottom):
+        sigma_e_odom = centerline_arc_length_between_rows(
+            dw.cs, float(y_ego), y_odom_bottom, n_fine=arc_nf
+        )
+        return float(sigma_start) + rel * (
+            float(sigma_e_odom) - float(d_odom)
+        )
+    return float(sigma_start) + rel * float(sigma_e_ref)
 
 
-def convoy_left_lane_pass_weight(
+def _convoy_arc_offsets_n() -> tuple[float, ...]:
+    if not bool(getattr(cfg, "BOT_CONVOY_ENABLE", False)):
+        return tuple()
+    raw = getattr(cfg, "BOT_CONVOY_ARC_OFFSET_FROM_LEAD_PX", ())
+    if not raw:
+        return tuple()
+    n = max(0, int(getattr(cfg, "BOT_CONVOY_COUNT", 0)))
+    if n <= 0:
+        return tuple()
+    return tuple(float(x) for x in raw[:n])
+
+
+def convoy_right_lane_active() -> bool:
+    """True if convoy extras are configured (independent of ``BOT_CAR_ENABLE``)."""
+    return len(_convoy_arc_offsets_n()) > 0
+
+
+def convoy_right_lane_pass_weight(
     y_ego: float,
     dw: DrivingWorld,
     y_ref_bottom: float,
     px_per_m: float,
 ) -> float:
-    """Max arc-window blend vs ego for static left-lane convoy (merge-right curriculum)."""
-    specs = _convoy_left_lane_bot_specs(dw)
-    if not specs:
+    """Max pass blend vs ego over right-lane convoy (same window as slow bot; left-lane pass)."""
+    offs = _convoy_arc_offsets_n()
+    if not offs:
         return 0.0
     arc_nf = int(getattr(cfg, "SIM_SLOW_BOT_ARC_N_FINE", 320))
+    sigma_lead = slow_bot_sigma_b_odom(
+        float(y_ego), dw, float(y_ref_bottom), n_fine=arc_nf
+    )
     sigma_e_ref = centerline_arc_length_between_rows(
         dw.cs, float(y_ego), float(y_ref_bottom), n_fine=arc_nf
     )
     w_max = 0.0
-    for sigma_b, *_ in specs:
-        gap = float(sigma_b - sigma_e_ref)
+    for off in offs:
+        sigma_k = float(sigma_lead) + float(off)
+        gap = float(sigma_k - sigma_e_ref)
         w_max = max(w_max, _slow_bot_pass_blend_weight(gap, px_per_m))
     return float(w_max)
 
 
-def draw_convoy_left_lane_bots_bev(
+def convoy_right_lane_bot_poses(
+    y_ego: float,
+    dw: DrivingWorld,
+    y_ref_bottom: float,
+    right_lane_offset_px: float,
+    *,
+    y_arc_hints: list[float | None] | None = None,
+) -> list[tuple[float, float, float]]:
+    """Right-lane ``(qx, qy, psi)`` for each convoy car on-map; same motion law as lead slow bot."""
+    offs = _convoy_arc_offsets_n()
+    if not offs:
+        return []
+    arc_nf = int(getattr(cfg, "SIM_SLOW_BOT_ARC_N_FINE", 320))
+    arc_ni = int(getattr(cfg, "SIM_SLOW_BOT_Y_AT_ARC_ITER", 36))
+    arc_newton_max = int(getattr(cfg, "SIM_SLOW_BOT_ARC_NEWTON_MAX", 10))
+    arc_newton_tol = float(getattr(cfg, "SIM_SLOW_BOT_ARC_NEWTON_TOL_PX", 0.25))
+    y_top = float(cfg.DATASET_MAP_MARGIN)
+    sigma_lead = slow_bot_sigma_b_odom(
+        float(y_ego), dw, float(y_ref_bottom), n_fine=arc_nf
+    )
+    hints = y_arc_hints or [None] * len(offs)
+    out: list[tuple[float, float, float]] = []
+    for i, off in enumerate(offs):
+        sigma_k = float(sigma_lead) + float(off)
+        y_hint = hints[i] if i < len(hints) else None
+        y_row = centerline_y_at_arc_from_bottom(
+            dw.cs,
+            float(y_ref_bottom),
+            float(sigma_k),
+            y_top,
+            n_iter=arc_ni,
+            n_fine=arc_nf,
+            y_hint=y_hint,
+            newton_max=arc_newton_max,
+            newton_tol_px=arc_newton_tol,
+        )
+        if (
+            not np.isfinite(y_row)
+            or y_row < y_top
+            or y_row > float(y_ref_bottom) - 1.0
+        ):
+            continue
+        x_c = float(dw.get_road_center(y_row))
+        dxdY = float(dw.cs(y_row, nu=1))
+        psi = _psi_road_from_dxdY(dxdY)
+        qx, qy = _right_lane_bev_xy(
+            x_c, y_row, psi, float(right_lane_offset_px)
+        )
+        out.append((float(qx), float(qy), psi))
+    return out
+
+
+def draw_convoy_right_lane_bots_bev(
     world_bgr: np.ndarray,
     dw: DrivingWorld,
+    y_ego: float,
+    y_ref_bottom: float,
+    right_lane_offset_px: float,
     *,
     for_perspective_warp: bool = False,
+    y_arc_hints: list[float | None] | None = None,
 ) -> None:
-    """Draw all convoy cars (same art as slow bot)."""
-    for _s, _yr, qx, qy, psi in _convoy_left_lane_bot_specs(dw):
+    for qx, qy, psi in convoy_right_lane_bot_poses(
+        float(y_ego),
+        dw,
+        float(y_ref_bottom),
+        float(right_lane_offset_px),
+        y_arc_hints=y_arc_hints,
+    ):
         draw_slow_bot_car_bev(
             world_bgr,
             qx,
@@ -609,42 +697,13 @@ def slow_bot_car_pass_blend_and_pose(
     arc_ni = int(getattr(cfg, "SIM_SLOW_BOT_Y_AT_ARC_ITER", 36))
     arc_newton_max = int(getattr(cfg, "SIM_SLOW_BOT_ARC_NEWTON_MAX", 10))
     arc_newton_tol = float(getattr(cfg, "SIM_SLOW_BOT_ARC_NEWTON_TOL_PX", 0.25))
-    head_px = float(cfg.BOT_CAR_HEAD_START_M) * px_per_m
-    rel = float(cfg.BOT_CAR_REL_SPEED)
     y_top = float(cfg.DATASET_MAP_MARGIN)
-    s_full = centerline_arc_length_between_rows(
-        dw.cs, y_top, float(y_ref_bottom), n_fine=arc_nf
-    )
-    frac = float(
-        np.clip(
-            float(getattr(cfg, "BOT_CAR_START_FRAC_FROM_BOTTOM", 1.0 / 3.0)),
-            0.0,
-            0.999,
-        )
-    )
-    sigma_start = frac * float(s_full) + head_px
-    # Arc(``y_ego``, ``y_ref_bottom``) *shrinks* while the ego starts below the dataset bottom
-    # (``find_start_pose_bottom`` uses rows near ``h - 1``, often *below* ``h - DATASET_MAP_MARGIN``)
-    # and drives up until it crosses ``y_ref_bottom`` — so ``sigma_b = sigma_start + rel * sigma_e``
-    # made the bot slide **down** the map then reverse. Below ``y_ref``, couple to arc to the image
-    # bottom (``y_ref_bottom + DATASET_MAP_MARGIN - 1``) so forward motion always increases ``sigma_b``;
-    # at ``y_ref`` both pieces match. Past ``y_ref``, keep the original arc-to-ref odometer.
-    y_odom_bottom = float(y_ref_bottom) + float(cfg.DATASET_MAP_MARGIN) - 1.0
-    d_odom = centerline_arc_length_between_rows(
-        dw.cs, float(y_ref_bottom), y_odom_bottom, n_fine=arc_nf
+    sigma_b = slow_bot_sigma_b_odom(
+        float(y_ego), dw, float(y_ref_bottom), n_fine=arc_nf
     )
     sigma_e_ref = centerline_arc_length_between_rows(
         dw.cs, float(y_ego), float(y_ref_bottom), n_fine=arc_nf
     )
-    if float(y_ego) > float(y_ref_bottom):
-        sigma_e_odom = centerline_arc_length_between_rows(
-            dw.cs, float(y_ego), y_odom_bottom, n_fine=arc_nf
-        )
-        sigma_b = float(sigma_start) + rel * (
-            float(sigma_e_odom) - float(d_odom)
-        )
-    else:
-        sigma_b = float(sigma_start) + rel * float(sigma_e_ref)
     y_bot_row = centerline_y_at_arc_from_bottom(
         dw.cs,
         float(y_ref_bottom),
@@ -689,8 +748,7 @@ def lateral_offset_px_avoid_roadkill(
     when passing the roadkill band (smooth ramps).
 
     ``extra_left_lane_blend`` (e.g. slow bot passing) is merged with ``max(w_roadkill, w_extra)``.
-    ``extra_merge_right_blend`` (e.g. left-lane convoy) pulls the result toward the **right** lane after
-    that merge.
+    ``extra_merge_right_blend`` pulls the result toward the **right** lane after the left merge (optional).
 
     Roadkill splats live on the **main** road only; set ``on_main_road=False`` for off-ramp poses
     (matches ``generate_dataset`` off-ramp crops, which use a fixed right-lane offset).

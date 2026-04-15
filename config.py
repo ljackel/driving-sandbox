@@ -198,6 +198,13 @@ ROADKILL_ALONG_MAX_LANE_WIDTHS = 2.2
 # ``BOT_CAR_START_FRAC_FROM_BOTTOM`` × full centerline arc to ``DATASET_MAP_MARGIN`` (keeps bot clear of
 # low-``y`` roadkill), plus optional ``BOT_CAR_HEAD_START_M``. Then ``BOT_CAR_REL_SPEED`` × ego arc so ego catches up.
 BOT_CAR_ENABLE = True
+# When ``BOT_CAR_ANCHOR_TO_OFFRAMP_ENABLE``, lead + convoy arc reference is pinned just **below** that branch
+# row (tighter offset = closer to exit, harder merge). Otherwise use ``BOT_CAR_START_FRAC_FROM_BOTTOM``.
+BOT_CAR_ANCHOR_TO_OFFRAMP_ENABLE = True
+# ``DrivingWorld.offramp_branch_y_pxs()`` index: ``1`` = second ramp (further up the map).
+BOT_CAR_ANCHOR_OFFRAMP_INDEX = 1
+# Main-road row = branch ``y`` + this (screen-down / larger ``y``); smaller ⇒ closer to the exit split.
+BOT_CAR_ANCHOR_Y_OFFSET_PX_BELOW_BRANCH = 10.0
 BOT_CAR_START_FRAC_FROM_BOTTOM =  .25
 BOT_CAR_HEAD_START_M = 0.0
 BOT_CAR_REL_SPEED = 0.2
@@ -218,7 +225,7 @@ SIM_SLOW_BOT_Y_AT_ARC_ITER = 36
 SIM_SLOW_BOT_ARC_NEWTON_MAX = 10
 SIM_SLOW_BOT_ARC_NEWTON_TOL_PX = 0.25
 # **Convoy** (extra slow traffic in the **right lane**): same arc odometer as the lead slow bot
-# (``BOT_CAR_REL_SPEED``, ``BOT_CAR_START_FRAC_FROM_BOTTOM``, etc.) via ``slow_bot_sigma_b_odom``, with
+# (``slow_bot_sigma_b_odom``: anchor or ``BOT_CAR_START_FRAC_FROM_BOTTOM``), with
 # fixed arc offsets (px) **behind** that lead. Pass / label blending uses the same raised-cosine as the
 # slow bot (left-lane pass), taking the max over convoy vehicles.
 BOT_CONVOY_ENABLE = True
