@@ -423,7 +423,7 @@ def _compute_sim_yaw_rate_gain() -> float:
 
 
 # --- Open-loop simulator (simulate.py) ---
-SIM_SPEED_M_S = 20.0
+SIM_SPEED_M_S = 40.0
 SIM_DT = 0.05
 # Heading rate (rad/s) per unit network output; derived from κ_max and speed (see ``_compute_sim_yaw_rate_gain``).
 # Nudge upward slightly if behavioral cloning still under-steers in open loop. Computed **lazily** on first
