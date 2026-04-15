@@ -281,6 +281,42 @@ def centerline_arc_length_between_rows(
     return float(np.sum(np.sqrt(np.diff(x_fine) ** 2 + np.diff(y_fine) ** 2)))
 
 
+def centerline_y_at_arc_from_bottom(
+    cs: Any,
+    y_ref_bottom: float,
+    sigma_target: float,
+    y_top: float,
+    *,
+    n_iter: int = 48,
+) -> float:
+    """
+    Row ``y`` in ``[y_top, y_ref_bottom]`` such that arc length along the centerline from ``y`` to
+    ``y_ref_bottom`` equals ``sigma_target`` (traffic toward decreasing ``y`` / map top).
+
+    ``y_top`` is the smallest valid row (map top inset); ``y_ref_bottom`` is the reference row at the
+    drivable bottom (e.g. ``WORLD_IMAGE_SIZE - DATASET_MAP_MARGIN``).
+    """
+    sigma_target = float(max(0.0, sigma_target))
+    lo = float(min(y_top, y_ref_bottom))
+    hi = float(max(y_top, y_ref_bottom))
+    if hi <= lo + 1e-9:
+        return float(lo)
+    s_max = centerline_arc_length_between_rows(cs, lo, y_ref_bottom)
+    if sigma_target >= s_max - 1e-6:
+        return float(lo)
+    if sigma_target <= 1e-9:
+        return float(hi)
+    low, high = lo, hi
+    for _ in range(int(n_iter)):
+        mid = 0.5 * (low + high)
+        s_mid = centerline_arc_length_between_rows(cs, mid, y_ref_bottom)
+        if s_mid > sigma_target:
+            low = mid
+        else:
+            high = mid
+    return float(high)
+
+
 def offramp_clean_counts_matching_main_spacing(
     L_ramp_px: float,
     num_train: int,

@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 from scipy.interpolate import CubicSpline
 
 import config as cfg
+from dataset_split import centerline_arc_length_between_rows, centerline_y_at_arc_from_bottom
 from perspective_camera import bev_point_to_camera_uv, perspective_camera_homography
 
 
@@ -288,6 +289,149 @@ def _roadkill_blend_weight_visible_gated(
     return w_max
 
 
+def _psi_road_from_dxdY(dxdY: float) -> float:
+    """Road tangent (rad) toward decreasing ``y``; matches ``generate_dataset._psi_from_dxdY``."""
+    norm = float(np.hypot(float(dxdY), 1.0))
+    return float(np.arctan2(-1.0 / norm, -float(dxdY) / norm))
+
+
+def _right_lane_bev_xy(
+    x: float,
+    y: float,
+    psi: float,
+    lateral_offset_px: float,
+) -> tuple[float, float]:
+    rx = float(-np.sin(psi))
+    ry = float(np.cos(psi))
+    return x + rx * float(lateral_offset_px), y + ry * float(lateral_offset_px)
+
+
+def _bev_car_polygon_int32(
+    cx: float,
+    cy: float,
+    psi: float,
+    len_px: float,
+    wid_px: float,
+) -> np.ndarray:
+    fx = float(np.cos(psi))
+    fy = float(np.sin(psi))
+    rx = float(-np.sin(psi))
+    ry = float(np.cos(psi))
+    hl = 0.5 * float(len_px)
+    hw = 0.5 * float(wid_px)
+    corners = np.array(
+        [
+            [cx + hl * fx + hw * rx, cy + hl * fy + hw * ry],
+            [cx + hl * fx - hw * rx, cy + hl * fy - hw * ry],
+            [cx - hl * fx - hw * rx, cy - hl * fy - hw * ry],
+            [cx - hl * fx + hw * rx, cy - hl * fy + hw * ry],
+        ],
+        dtype=np.float64,
+    )
+    return np.round(corners).astype(np.int32).reshape(-1, 1, 2)
+
+
+def _bot_car_display_extents_px(px_per_m: float) -> tuple[float, float]:
+    len_px = float(cfg.SIM_BEV_EGO_CAR_LENGTH_M) * float(px_per_m)
+    wid_px = float(cfg.SIM_BEV_EGO_CAR_WIDTH_M) * float(px_per_m)
+    mn = float(cfg.SIM_BEV_EGO_CAR_MIN_DISPLAY_LEN_PX)
+    if mn > 0.0 and len_px < mn:
+        s = mn / max(len_px, 1e-6)
+        len_px *= s
+        wid_px *= s
+    return len_px, wid_px
+
+
+def draw_slow_bot_car_bev(
+    world_bgr: np.ndarray,
+    cx: float,
+    cy: float,
+    psi: float,
+    px_per_m: float,
+) -> None:
+    """In-place top-down bot vehicle (distinct color) for perspective / BEV compositing."""
+    len_px, wid_px = _bot_car_display_extents_px(px_per_m)
+    poly = _bev_car_polygon_int32(cx, cy, psi, len_px, wid_px)
+    cv2.fillConvexPoly(world_bgr, poly, (55, 75, 220))
+    cv2.polylines(world_bgr, [poly], True, (230, 230, 255), 1, cv2.LINE_AA)
+    fx = float(np.cos(psi))
+    fy = float(np.sin(psi))
+    hx0 = cx - 0.22 * len_px * fx
+    hy0 = cy - 0.22 * len_px * fy
+    hx1 = cx + 0.38 * len_px * fx
+    hy1 = cy + 0.38 * len_px * fy
+    cv2.line(
+        world_bgr,
+        (int(round(hx0)), int(round(hy0))),
+        (int(round(hx1)), int(round(hy1))),
+        (180, 200, 255),
+        1,
+        cv2.LINE_AA,
+    )
+
+
+def _slow_bot_pass_blend_weight(gap_sigma_px: float, px_per_m: float) -> float:
+    """
+    ``gap_sigma_px = σ_bot − σ_ego`` (arc px from map-bottom reference). Positive ⇒ bot still ahead.
+    """
+    gap = float(gap_sigma_px)
+    if gap <= 0.0:
+        exit_px = float(cfg.BOT_CAR_EXIT_ARC_M) * px_per_m
+        if gap >= -exit_px:
+            t = float(-gap / max(exit_px, 1e-6))
+            pe = float(getattr(cfg, "ROADKILL_DETOUR_EXIT_EASE_POWER", 1.0))
+            if pe != 1.0:
+                t = float(np.clip(t, 0.0, 1.0) ** pe)
+            return float(_raised_cosine01(1.0 - t))
+        return 0.0
+    far_px = float(cfg.BOT_CAR_PASS_INFLUENCE_ARC_M) * px_per_m
+    if gap >= far_px:
+        return 0.0
+    near_px = float(cfg.BOT_CAR_CORE_ARC_M) * px_per_m
+    if gap <= near_px:
+        return 1.0
+    t = (far_px - gap) / max(far_px - near_px, 1e-6)
+    return float(_raised_cosine01(t))
+
+
+def slow_bot_car_pass_blend_and_pose(
+    y_ego: float,
+    dw: DrivingWorld,
+    y_ref_bottom: float,
+    right_lane_offset_px: float,
+) -> tuple[float, float | None, float | None, float | None]:
+    """
+    Arc-length slow-bot kinematics vs ego, left-lane pass blend, and right-lane BEV pose for drawing.
+
+    Returns:
+        ``(w_pass, qx, qy, psi)`` with ``None`` pose when the bot is off-map or feature disabled.
+    """
+    if not bool(getattr(cfg, "BOT_CAR_ENABLE", False)):
+        return (0.0, None, None, None)
+    px_per_m = float(dw.px_per_m)
+    head_px = float(cfg.BOT_CAR_HEAD_START_M) * px_per_m
+    rel = float(cfg.BOT_CAR_REL_SPEED)
+    sigma_e = centerline_arc_length_between_rows(dw.cs, float(y_ego), float(y_ref_bottom))
+    sigma_b = head_px + rel * sigma_e
+    y_top = float(cfg.DATASET_MAP_MARGIN)
+    y_bot_row = centerline_y_at_arc_from_bottom(
+        dw.cs, float(y_ref_bottom), sigma_b, y_top
+    )
+    if (
+        not np.isfinite(y_bot_row)
+        or y_bot_row < y_top
+        or y_bot_row > float(y_ref_bottom) - 1.0
+    ):
+        return (0.0, None, None, None)
+    x_c = float(dw.get_road_center(y_bot_row))
+    dxdY = float(dw.cs(y_bot_row, nu=1))
+    psi = _psi_road_from_dxdY(dxdY)
+    gap = float(sigma_b - sigma_e)
+    w = _slow_bot_pass_blend_weight(gap, px_per_m)
+    qx, qy = _right_lane_bev_xy(x_c, y_bot_row, psi, float(right_lane_offset_px))
+    return (w, float(qx), float(qy), float(psi))
+
+
 def lateral_offset_px_avoid_roadkill(
     y_row: float,
     right_lane_center_offset_px: float,
@@ -298,10 +442,13 @@ def lateral_offset_px_avoid_roadkill(
     x_center: float | None = None,
     psi: float | None = None,
     on_main_road: bool = True,
+    extra_left_lane_blend: float = 0.0,
 ) -> float:
     """
     Signed lateral offset (px) along driver's right: nominal right-lane center, or mirrored left-lane
     when passing the roadkill band (smooth ramps).
+
+    ``extra_left_lane_blend`` (e.g. slow bot passing) is merged with ``max(w_roadkill, w_extra)``.
 
     Roadkill splats live on the **main** road only; set ``on_main_road=False`` for off-ramp poses
     (matches ``generate_dataset`` off-ramp crops, which use a fixed right-lane offset).
@@ -315,32 +462,34 @@ def lateral_offset_px_avoid_roadkill(
     ramp is geometry-only so the return can finish after the hazard leaves the FOV.
     """
     r = float(right_lane_center_offset_px)
-    if not cfg.ROADKILL_ENABLE:
-        return r
     if not on_main_road:
         return r
-    use_vis = bool(getattr(cfg, "ROADKILL_DETOUR_ONLY_WHEN_VISIBLE", True))
-    if (
-        use_vis
-        and world_bgr is not None
-        and dw is not None
-        and x_center is not None
-        and psi is not None
-    ):
-        w = _roadkill_blend_weight_visible_gated(
-            float(y_row),
-            world_bgr,
-            dw,
-            float(x_center),
-            float(psi),
-            r,
-            for_training_labels=for_training_labels,
-        )
-    elif for_training_labels:
-        w = roadkill_left_lane_blend_weight_training(y_row)
-    else:
-        w = roadkill_left_lane_blend_weight(y_row)
-    return (1.0 - w) * r + w * (-r)
+    w = 0.0
+    if cfg.ROADKILL_ENABLE:
+        use_vis = bool(getattr(cfg, "ROADKILL_DETOUR_ONLY_WHEN_VISIBLE", True))
+        if (
+            use_vis
+            and world_bgr is not None
+            and dw is not None
+            and x_center is not None
+            and psi is not None
+        ):
+            w = _roadkill_blend_weight_visible_gated(
+                float(y_row),
+                world_bgr,
+                dw,
+                float(x_center),
+                float(psi),
+                r,
+                for_training_labels=for_training_labels,
+            )
+        elif for_training_labels:
+            w = roadkill_left_lane_blend_weight_training(y_row)
+        else:
+            w = roadkill_left_lane_blend_weight(y_row)
+    w_x = float(np.clip(float(extra_left_lane_blend), 0.0, 1.0))
+    w_eff = max(w, w_x)
+    return (1.0 - w_eff) * r + w_eff * (-r)
 
 
 def _bezier_quadratic_xy_d1_d2(

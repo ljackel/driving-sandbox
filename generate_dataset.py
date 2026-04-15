@@ -24,7 +24,12 @@ from dataset_split import (
     offramp_clean_counts_matching_main_spacing,
     offramp_train_u_rid_pairs_main_spacing,
 )
-from generate_world import DrivingWorld, lateral_offset_px_avoid_roadkill
+from generate_world import (
+    DrivingWorld,
+    draw_slow_bot_car_bev,
+    lateral_offset_px_avoid_roadkill,
+    slow_bot_car_pass_blend_and_pose,
+)
 
 
 def _psi_from_dxdY(dxdY: float) -> float:
@@ -304,6 +309,42 @@ def annotate_perturb_debug_bgr(
     _put_outlined_lines_bgr(img, lines, cfg.ANNOT_STEERING_POS)
 
 
+def _world_main_road_with_bot_and_lateral(
+    world: np.ndarray,
+    dw: DrivingWorld,
+    yf: float,
+    road_x: float,
+    dxdY: float,
+    psi_road: float,
+    right_lane_offset_px: float,
+    map_size: int,
+    margin: float,
+) -> tuple[np.ndarray, float]:
+    """
+    Optional slow-bot BEV composite + merged left-lane lateral (roadkill max slow-bot pass weight).
+    Roadkill visibility uses the base ``world`` (no bot) so splat gating is unchanged.
+    """
+    y_ref = float(map_size) - float(margin)
+    w_bot, qx, qy, ppsi = slow_bot_car_pass_blend_and_pose(
+        float(yf), dw, y_ref, right_lane_offset_px
+    )
+    world_use = world
+    if qx is not None:
+        world_use = world.copy()
+        draw_slow_bot_car_bev(world_use, qx, qy, ppsi, float(dw.px_per_m))
+    lat_px = lateral_offset_px_avoid_roadkill(
+        float(yf),
+        right_lane_offset_px,
+        for_training_labels=True,
+        world_bgr=world,
+        dw=dw,
+        x_center=float(road_x),
+        psi=psi_road,
+        extra_left_lane_blend=w_bot,
+    )
+    return world_use, lat_px
+
+
 def _clear_jpgs_in_dir(dir_path: str) -> None:
     """Remove ``*.jpg`` in ``dir_path`` if the directory exists (stale frames from smaller runs)."""
     if not os.path.isdir(dir_path):
@@ -336,6 +377,10 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES, num_test=cfg.NUM_TEST_FRAMES):
     ``ROADKILL_EVAL_ONLY_OBSTACLE_Y_PX``, but **main-road** crops and lateral reference for labels use only
     ``ROADKILL_OBSTACLE_Y_PX`` (``lateral_offset_px_avoid_roadkill(..., for_training_labels=True)``).
     ``simulate`` uses the full set (training + eval-only) for open-loop generalization tests.
+
+    **Slow bot:** when ``BOT_CAR_ENABLE``, main-road frames composite a slower vehicle in the right lane
+    ahead (``BOT_CAR_HEAD_START_M``, ``BOT_CAR_REL_SPEED`` vs ego arc from map bottom); lateral labels use
+    ``max(roadkill, pass)`` like an extra left-lane curriculum (κ still from centerline at ``y``).
 
     **Off-ramp:** when ``OFFRAMP_ENABLE`` and ``DATASET_OFFRAMP_LABELS_ENABLE``, also writes
     ``train/offramp_*.jpg`` / ``test/offramp_*.jpg`` with ``take_offramp=1`` and κ from the Bézier.
@@ -397,17 +442,19 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES, num_test=cfg.NUM_TEST_FRAMES):
         road_x = dw.get_road_center(yf)
         dxdY = float(dw.cs(yf, nu=1))
         psi_road = _psi_from_dxdY(dxdY)
-        lat_px = lateral_offset_px_avoid_roadkill(
-            float(yf),
+        world_row, lat_px = _world_main_road_with_bot_and_lateral(
+            world,
+            dw,
+            yf,
+            road_x,
+            dxdY,
+            psi_road,
             right_lane_offset_px,
-            for_training_labels=True,
-            world_bgr=world,
-            dw=dw,
-            x_center=float(road_x),
-            psi=psi_road,
+            size,
+            margin,
         )
         view = get_perspective_view(
-            world,
+            world_row,
             yf,
             road_x,
             dxdY,
@@ -434,20 +481,23 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES, num_test=cfg.NUM_TEST_FRAMES):
             dxdY = float(dw.cs(yf, nu=1))
             psi_road = _psi_from_dxdY(dxdY)
             idx = num_train + j
-            view, lat_m, yaw_rad = _sample_perturbed_perspective_view(
+            world_row, lat_base = _world_main_road_with_bot_and_lateral(
                 world,
+                dw,
                 yf,
                 road_x,
                 dxdY,
-                lateral_offset_px_avoid_roadkill(
-                    float(yf),
-                    right_lane_offset_px,
-                    for_training_labels=True,
-                    world_bgr=world,
-                    dw=dw,
-                    x_center=float(road_x),
-                    psi=psi_road,
-                ),
+                psi_road,
+                right_lane_offset_px,
+                size,
+                margin,
+            )
+            view, lat_m, yaw_rad = _sample_perturbed_perspective_view(
+                world_row,
+                yf,
+                road_x,
+                dxdY,
+                lat_base,
                 dw.px_per_m,
                 rng,
                 cfg.PERTURB_LATERAL_STD_M,
@@ -475,20 +525,23 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES, num_test=cfg.NUM_TEST_FRAMES):
                 dxdY = float(dw.cs(yf, nu=1))
                 psi_road = _psi_from_dxdY(dxdY)
                 idx = base_idx + k
-                view, lat_m, yaw_rad = _sample_perturbed_perspective_view(
+                world_row, lat_base = _world_main_road_with_bot_and_lateral(
                     world,
+                    dw,
                     yf,
                     road_x,
                     dxdY,
-                    lateral_offset_px_avoid_roadkill(
-                        float(yf),
-                        right_lane_offset_px,
-                        for_training_labels=True,
-                        world_bgr=world,
-                        dw=dw,
-                        x_center=float(road_x),
-                        psi=psi_road,
-                    ),
+                    psi_road,
+                    right_lane_offset_px,
+                    size,
+                    margin,
+                )
+                view, lat_m, yaw_rad = _sample_perturbed_perspective_view(
+                    world_row,
+                    yf,
+                    road_x,
+                    dxdY,
+                    lat_base,
                     dw.px_per_m,
                     rng,
                     cfg.PERTURB_LATERAL_STD_M,
@@ -550,17 +603,19 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES, num_test=cfg.NUM_TEST_FRAMES):
         road_x = dw.get_road_center(yf)
         dxdY = float(dw.cs(yf, nu=1))
         psi_road = _psi_from_dxdY(dxdY)
-        lat_px = lateral_offset_px_avoid_roadkill(
-            float(yf),
+        world_row, lat_px = _world_main_road_with_bot_and_lateral(
+            world,
+            dw,
+            yf,
+            road_x,
+            dxdY,
+            psi_road,
             right_lane_offset_px,
-            for_training_labels=True,
-            world_bgr=world,
-            dw=dw,
-            x_center=float(road_x),
-            psi=psi_road,
+            size,
+            margin,
         )
         view = get_perspective_view(
-            world,
+            world_row,
             yf,
             road_x,
             dxdY,
@@ -586,20 +641,23 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES, num_test=cfg.NUM_TEST_FRAMES):
             dxdY = float(dw.cs(yf, nu=1))
             psi_road = _psi_from_dxdY(dxdY)
             idx = int(num_test) + j
-            view, lat_m, yaw_rad = _sample_perturbed_perspective_view(
+            world_row, lat_base = _world_main_road_with_bot_and_lateral(
                 world,
+                dw,
                 yf,
                 road_x,
                 dxdY,
-                lateral_offset_px_avoid_roadkill(
-                    float(yf),
-                    right_lane_offset_px,
-                    for_training_labels=True,
-                    world_bgr=world,
-                    dw=dw,
-                    x_center=float(road_x),
-                    psi=psi_road,
-                ),
+                psi_road,
+                right_lane_offset_px,
+                size,
+                margin,
+            )
+            view, lat_m, yaw_rad = _sample_perturbed_perspective_view(
+                world_row,
+                yf,
+                road_x,
+                dxdY,
+                lat_base,
                 dw.px_per_m,
                 rng_test,
                 cfg.PERTURB_LATERAL_STD_M,

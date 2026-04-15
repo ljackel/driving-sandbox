@@ -30,9 +30,11 @@ Summary:
 from __future__ import annotations
 
 import json
+from nt import truncate
 import sys
-from pickle import TRUE
 import types
+
+from pandas.core.algorithms import T
 
 # --- Paths (relative to project root) ---
 DATA_DIR = "data"
@@ -52,8 +54,8 @@ MAX_SIM_SPEED = True
 
 # Applied only when ``MAX_SIM_SPEED`` is False.
 _CUSTOM_SIM_REALTIME_BEV = True
-_CUSTOM_SIM_REALTIME_DRIVER_VIEW = True
-_CUSTOM_SIM_REALTIME_BEV_WAIT_MS = 1
+_CUSTOM_SIM_REALTIME_DRIVER_VIEW = False
+_CUSTOM_SIM_REALTIME_BEV_WAIT_MS = 0
 _CUSTOM_SIM_REALTIME_STEP_PAUSE_MS = 0
 _CUSTOM_SIM_CUDNN_BENCHMARK = True
 _CUSTOM_SIM_TORCH_COMPILE = False
@@ -122,20 +124,20 @@ SPLINE_NUM_CONTROL_POINTS = 11
 # X offsets from map center for spline control points, bottom → top along the road.
 # Length must match SPLINE_NUM_CONTROL_POINTS. Order: bottom (large y) → top (small y).
 # More points + alternating Δ → about twice as many bends as the old 6-point S-curve (stay ~±260 px).
-# CubicSpline: dx/dy=0 at bottom (large y). Larger |Δ| = curvier road (stay within ~±260 px of center).
+# CubicSpline: dx/dy=0 at bottom (large y). Larger |Δ| = curvier road (stay within ~±130 px of center here).
 # First two non-center knots from the bottom are 0 so the **lower** part of the road stays straight;
-# curvature starts at the next control (``104``).
+# curvature starts at the next control. Values are ~half of the previous S-curve (half as curvy).
 SPLINE_X_DELTAS_BOTTOM_TO_TOP = (
     0,
     0,
     0,
-    104,
-    -52,
-    100,
-    -56,
-    96,
-    -52,
-    82,
+    52,
+    -26,
+    50,
+    -28,
+    48,
+    -26,
+    41,
     0,
 )
 # Knot heights: fractions from top (0) to bottom (1) of the map. Uneven steps → bends irregularly
@@ -192,6 +194,16 @@ ROADKILL_ACROSS_ROAD_HALF_PX = 3.0
 ROADKILL_ACROSS_MAX_FRAC_OF_LANE = 0.38
 # Max multiple of lane width for along-road semi-axis (elongated but not huge).
 ROADKILL_ALONG_MAX_LANE_WIDTHS = 2.2
+# Slow **bot car** on the main road (same right-lane lateral as dataset camera): arc-length odometer from
+# map bottom; bot lies ``BOT_CAR_HEAD_START_M`` ahead of ego at σ=0 and moves at ``BOT_CAR_REL_SPEED`` × ego
+# arc speed so ego catches up. Passing uses left-lane blend (same sign as roadkill) + bot drawn on BEV before warp.
+BOT_CAR_ENABLE = True
+BOT_CAR_HEAD_START_M = 42.0
+BOT_CAR_REL_SPEED = 0.5
+# Arc-length windows (meters → px in code) for raised-cosine pass / merge-back weights vs ``σ_bot − σ_ego``.
+BOT_CAR_PASS_INFLUENCE_ARC_M = 92.0
+BOT_CAR_CORE_ARC_M = 16.0
+BOT_CAR_EXIT_ARC_M = 36.0
 # Off-ramp geometry (see ``OFFRAMP_ENABLE`` in switches): branch on main centerline; image-row fraction
 # (0 = top, 1 = bottom). Must be > 0.5 for bottom-half exit; ignored otherwise.
 OFFRAMP_BRANCH_Y_FRAC = 0.78
@@ -472,7 +484,8 @@ SIM_REALTIME_WINDOW_ORIGIN_X = 40
 SIM_REALTIME_WINDOW_ORIGIN_Y = 40
 SIM_REALTIME_WINDOW_GAP_PX = 32
 # ``SIM_REALTIME_BEV_WAIT_MS`` / ``SIM_REALTIME_STEP_PAUSE_MS``: set by ``MAX_SIM_SPEED`` / ``_CUSTOM_SIM_*`` at top.
-# (``waitKey``: ``0`` = block until a key each step. Step pause does not change physics, only display pacing.)
+# Per-frame GUI wait: ``0`` = one ``waitKey(1)`` (smooth realtime); ``> 0`` caps frame time; ``< 0`` = step-through
+# (press a key to advance each frame). Step pause does not change physics, only display pacing.
 # BEV on-map speed bar (drag): position / ``SIM_REALTIME_SPEED_TRACKBAR_CENTER`` scales arc-length step per
 # roll-out iteration (100 = nominal ``SIM_SPEED_M_S * SIM_DT`` in px). Names are legacy from cv2 trackbars.
 SIM_REALTIME_SPEED_TRACKBAR_MAX = 200
