@@ -35,9 +35,10 @@ With CUDA, ``SIM_CUDNN_BENCHMARK`` and optional ``SIM_TORCH_COMPILE`` reduce per
 **Input crop:** ``PERSPECTIVE_INPUT_BOTTOM_HALF_ONLY`` matches ``train.py`` / ``evaluate_test.py`` (bottom
 half of the warp, then resize to ``CAMERA_IMAGE_SIZE``).
 
-**Intent / off-ramp:** ``SIM_TAKE_OFFRAMP`` selects main vs ramp steering targets. With
-``SIM_PROJECT_REF_ONTO_MAIN_ROAD`` and an enabled off-ramp, the reference switches from the **main** spline
-to the **ramp** Bézier after the branch ``y``; motion on the ramp uses arc-length steps in ``u``.
+**Intent / off-ramp:** ``take_offramp`` to the network follows ``SIM_TAKE_OFFRAMP`` or geographic
+``SIM_TAKE_OFFRAMP_UPPER_HALF_NAV``. With ``SIM_PROJECT_REF_ONTO_MAIN_ROAD`` and off-ramps enabled, kinematics
+merge onto a ramp at a branch ``y`` only when that intent is active (so e.g. exit 117 in the upper half can be
+taken while skipping a lower-half exit).
 
 **Camera / overlay heading:** the warp and BEV trail use the **road tangent** at ``(x, y)``—main spline or
 ramp Bézier when on the ramp—not the integrated BC ``psi``. Otherwise ``psi`` drift places the right-lane
@@ -531,6 +532,43 @@ def _draw_bev_ego_car_icon(
     )
 
 
+def _bev_draw_nav_instruction_box(
+    vis: np.ndarray, text: str, *, x0: int = 10, y0: int = 8
+) -> int:
+    """Filled + bordered box in the upper-left; returns y just below the box."""
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    scale = 0.58
+    thick = 2
+    pad_x, pad_y = 10, 8
+    (tw, th), baseline = cv2.getTextSize(text, font, scale, thick)
+    x1, y1 = x0, y0
+    y_baseline = y1 + pad_y + th
+    x2 = x1 + tw + 2 * pad_x
+    y2 = y_baseline + baseline + pad_y
+    h, w = vis.shape[:2]
+    x2 = min(x2, w - 8)
+    y2 = min(y2, h - 8)
+    cv2.rectangle(vis, (x1, y1), (x2, y2), (38, 42, 48), -1, cv2.LINE_AA)
+    cv2.rectangle(vis, (x1, y1), (x2, y2), (200, 220, 255), 2, cv2.LINE_AA)
+    cv2.putText(
+        vis,
+        text,
+        (x1 + pad_x, y_baseline),
+        font,
+        scale,
+        (248, 252, 255),
+        thick,
+        cv2.LINE_AA,
+    )
+    return int(y2)
+
+
+def _bev_nav_exit_active(y_img: float, h_map: int) -> bool:
+    if not bool(cfg.SIM_TAKE_OFFRAMP_UPPER_HALF_NAV):
+        return False
+    return float(y_img) <= 0.5 * float(h_map)
+
+
 def _bev_realtime_frame(
     world_bgr: np.ndarray,
     dw: DrivingWorld,
@@ -541,6 +579,8 @@ def _bev_realtime_frame(
     lateral_px: float,
     *,
     extra_hint: str | None = None,
+    nav_exit_active: bool = False,
+    nav_exit_text: str = "take the next exit",
 ) -> np.ndarray:
     """Bird's-eye frame: trail and ego in the **right lane** (not centerline)."""
     vis = world_bgr.copy()
@@ -565,11 +605,15 @@ def _bev_realtime_frame(
         cv2.polylines(vis, [pts], False, (200, 200, 255), 2, cv2.LINE_AA)
     qx, qy = _right_lane_overlay_xy(float(x), float(y), float(psi_draw), lateral_px)
     _draw_bev_ego_car_icon(vis, float(qx), float(qy), float(psi_draw), float(dw.px_per_m))
+    below_nav = 0
+    if nav_exit_active and nav_exit_text:
+        below_nav = _bev_draw_nav_instruction_box(vis, nav_exit_text)
+    line1_y = 26 if below_nav == 0 else below_nav + 18
     line1 = f"step {len(path) - 1}   Space pause   q quit   Ctrl+C (terminal)"
     cv2.putText(
         vis,
         line1,
-        (10, 26),
+        (10, line1_y),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.65,
         (255, 255, 255),
@@ -577,10 +621,11 @@ def _bev_realtime_frame(
         cv2.LINE_AA,
     )
     if extra_hint:
+        hint_y = line1_y + 26
         cv2.putText(
             vis,
             extra_hint,
-            (10, 52),
+            (10, hint_y),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.55,
             (180, 255, 220),
@@ -716,7 +761,7 @@ def _rt_mouse_bev(event: int, x: int, y: int, flags: int, ui: dict) -> None:
                     float(y),
                     int(ctx["h"]),
                     float(ctx["margin"]),
-                    bool(ctx["follow_ramp_geom"]),
+                    bool(ctx["ramp_kinematics"]),
                 )
                 if pose is not None:
                     ui["reloc_preview_pose"] = pose
@@ -731,7 +776,7 @@ def _rt_mouse_bev(event: int, x: int, y: int, flags: int, ui: dict) -> None:
                 float(y),
                 int(ctx["h"]),
                 float(ctx["margin"]),
-                bool(ctx["follow_ramp_geom"]),
+                bool(ctx["ramp_kinematics"]),
             )
             if pose is not None:
                 ui["reloc_preview_pose"] = pose
@@ -745,7 +790,7 @@ def _rt_mouse_bev(event: int, x: int, y: int, flags: int, ui: dict) -> None:
                 float(y),
                 int(ctx["h"]),
                 float(ctx["margin"]),
-                bool(ctx["follow_ramp_geom"]),
+                bool(ctx["ramp_kinematics"]),
             )
             ui.pop("reloc_preview_pose", None)
             if pose is not None:
@@ -1011,7 +1056,7 @@ def _bev_reloc_snap_validated(
     my: float,
     h: int,
     margin: float,
-    follow_ramp_geom: bool,
+    ramp_kinematics: bool,
 ) -> dict[str, float | bool] | None:
     """
     Snap a BEV click to the nearest valid drivable pose (main and/or ramp), preferring smaller
@@ -1024,7 +1069,7 @@ def _bev_reloc_snap_validated(
     if main is not None:
         xc, y, psi_m, d2m = main
         candidates.append((d2m, xc, y, psi_m, False, 0.0, 0))
-    if follow_ramp_geom and dw._offramp_bezier_controls() is not None:
+    if ramp_kinematics and dw._offramp_bezier_controls() is not None:
         ramp = _snap_ramp_right_lane_nearest(dw, mx, my, world_bgr)
         if ramp is not None:
             u_r, rx, ry, psi_r, d2r, rid_r = ramp
@@ -1204,9 +1249,8 @@ def run_simulation() -> tuple[
     base_step_dist_px = cfg.SIM_SPEED_M_S * cfg.SIM_DT * px_per_m
 
     off_ok = dw.offramp_num() > 0
-    follow_ramp_geom = (
-        cfg.SIM_TAKE_OFFRAMP
-        and cfg.OFFRAMP_ENABLE
+    ramp_kinematics = (
+        cfg.OFFRAMP_ENABLE
         and off_ok
         and cfg.SIM_PROJECT_REF_ONTO_MAIN_ROAD
     )
@@ -1214,12 +1258,16 @@ def run_simulation() -> tuple[
     on_ramp = False
     u_ramp = 0.0
     ramp_id = 0
-    if follow_ramp_geom and off_branch_ys:
+    if ramp_kinematics and off_branch_ys:
         start_rid = -1
         for rid, yb in enumerate(off_branch_ys):
             if float(y0) <= yb + 1e-9:
                 start_rid = rid
-        if start_rid >= 0:
+        if cfg.SIM_TAKE_OFFRAMP_UPPER_HALF_NAV:
+            want_ramp_start = float(y0) <= 0.5 * float(h)
+        else:
+            want_ramp_start = bool(cfg.SIM_TAKE_OFFRAMP)
+        if start_rid >= 0 and want_ramp_start:
             on_ramp = True
             u_ramp = 0.0
             ramp_id = start_rid
@@ -1259,10 +1307,7 @@ def run_simulation() -> tuple[
     }
     user_quit_rt = False
     interrupt_rt = [False]
-    take_intent = 1.0 if cfg.SIM_TAKE_OFFRAMP else 0.0
-    take_t = torch.tensor(
-        [[take_intent]], device=device, dtype=torch.float32
-    )
+    take_t = torch.zeros((1, 1), device=device, dtype=torch.float32)
 
     def _sim_sigint(_signum: int, _frame: object) -> None:
         interrupt_rt[0] = True
@@ -1283,6 +1328,19 @@ def run_simulation() -> tuple[
                 break
             rt_ui["sim_step"] = sim_i
             step_dist_px = base_step_dist_px * float(rt_ui.get("speed_scale", 1.0))
+            y_for_model = float(y)
+            if cfg.SIM_TAKE_OFFRAMP_UPPER_HALF_NAV:
+                nav_take = 1.0 if y_for_model <= 0.5 * float(h) else 0.0
+            else:
+                nav_take = 1.0 if cfg.SIM_TAKE_OFFRAMP else 0.0
+            take_t[0, 0] = nav_take
+            merge_main_to_ramp = (
+                (cfg.SIM_TAKE_OFFRAMP_UPPER_HALF_NAV and nav_take >= 0.5)
+                or (
+                    not cfg.SIM_TAKE_OFFRAMP_UPPER_HALF_NAV
+                    and cfg.SIM_TAKE_OFFRAMP
+                )
+            )
             if on_ramp:
                 ev_pose = dw.offramp_bezier_evolution(u_ramp, ramp_id)
                 if ev_pose is None:
@@ -1335,20 +1393,22 @@ def run_simulation() -> tuple[
             # Gain matches kappa_max * speed * px_per_m (see config._compute_sim_yaw_rate_gain).
             psi += steering * cfg.SIM_YAW_RATE_GAIN * cfg.SIM_DT
             if cfg.SIM_PROJECT_REF_ONTO_MAIN_ROAD:
-                if follow_ramp_geom and on_ramp:
+                if ramp_kinematics and on_ramp:
                     step_r = dw.offramp_step_arc_px(
                         u_ramp, step_dist_px, ramp_id
                     )
                     if step_r is None:
                         break
                     u_ramp, x, y = step_r
-                elif follow_ramp_geom and not on_ramp:
+                elif ramp_kinematics and not on_ramp:
                     y_before = float(y)
                     x, y = _advance_main_centerline_arc_px(
                         dw, y, step_dist_px, margin=margin, h=h
                     )
                     for rid, yb in enumerate(off_branch_ys):
                         if y_before > yb + 1e-9 and float(y) <= yb + 1e-9:
+                            if not merge_main_to_ramp:
+                                continue
                             on_ramp = True
                             u_ramp = 0.0
                             ramp_id = rid
@@ -1404,7 +1464,7 @@ def run_simulation() -> tuple[
                 "world": world,
                 "h": h,
                 "margin": margin,
-                "follow_ramp_geom": follow_ramp_geom,
+                "ramp_kinematics": ramp_kinematics,
             }
             lat_hit = _ego_lateral_offset_px_at_y(
                 dw,
@@ -1475,6 +1535,8 @@ def run_simulation() -> tuple[
                             psi_draw,
                             lat_hit,
                             extra_hint=bev_hint,
+                            nav_exit_active=_bev_nav_exit_active(float(y), h),
+                            nav_exit_text=str(cfg.SIM_NAV_EXIT_INSTRUCTION_TEXT),
                         )
                         _rt_draw_speed_slider(fr, rt_ui)
                     if not rt_windows_placed:
@@ -1536,6 +1598,10 @@ def run_simulation() -> tuple[
                                     psi_draw,
                                     lat_hit,
                                     extra_hint=bh,
+                                    nav_exit_active=_bev_nav_exit_active(float(y), h),
+                                    nav_exit_text=str(
+                                        cfg.SIM_NAV_EXIT_INSTRUCTION_TEXT
+                                    ),
                                 )
                                 _rt_draw_speed_slider(fr, rt_ui)
                             view_live = get_view_from_pose(
@@ -1583,6 +1649,12 @@ def run_simulation() -> tuple[
                                 disp_psi_draw,
                                 disp_lat,
                                 extra_hint=bh,
+                                nav_exit_active=_bev_nav_exit_active(
+                                    float(disp_y), h
+                                ),
+                                nav_exit_text=str(
+                                    cfg.SIM_NAV_EXIT_INSTRUCTION_TEXT
+                                ),
                             )
                             _rt_draw_speed_slider(fr, rt_ui)
                         fr_disp = fr.copy() if fr is not None else None

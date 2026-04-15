@@ -24,6 +24,7 @@ Summary:
 from __future__ import annotations
 
 import json
+from pickle import TRUE
 import types
 
 # --- Paths (relative to project root) ---
@@ -61,10 +62,20 @@ OFFRAMP_ENABLE = True
 OFFRAMP_SINGLE_LANE = True
 OFFRAMP_SINGLE_LANE_LATERAL_SCALE = 0.5
 # Simulation: DrivingNet ``take_offramp`` input (1 = ramp intent; 0 = stay on main).
-# Off-ramp **geometry** in sim also needs ``SIM_PROJECT_REF_ONTO_MAIN_ROAD`` (see below).
+# Ramp **kinematics** (actually merging onto the Bézier) use ``SIM_PROJECT_REF_ONTO_MAIN_ROAD`` and
+# ``OFFRAMP_ENABLE``; at each branch, the sim merges only if intent is on (this flag when
+# ``SIM_TAKE_OFFRAMP_UPPER_HALF_NAV`` is false, else upper-half geographic intent).
 SIM_TAKE_OFFRAMP = False
+# When True, ``simulate.run_simulation`` sets ``take_offramp`` from ego image-y each step:
+# 1 while ``y <= WORLD_IMAGE_SIZE/2`` (upper half of the BEV), 0 otherwise, draws the nav cue, and **allows**
+# a merge onto an off-ramp at that time (e.g. skip a lower-half exit, take exit 117 / ``OFFRAMP_EXTRA_BRANCH_Y_PX``).
+# When False, ``take_offramp`` and merge-at-branch are fixed from ``SIM_TAKE_OFFRAMP`` for the whole rollout.
+SIM_TAKE_OFFRAMP_UPPER_HALF_NAV = True
+# Text shown in the realtime BEV nav box when upper-half intent is active.
+SIM_NAV_EXIT_INSTRUCTION_TEXT = "take the next exit"
 # Simulation: advance the centerline reference by arc length along the main spline (and off-ramp Bézier when
-# ``SIM_TAKE_OFFRAMP``). Avoids ``cos/sin(psi)`` + ``x=cs(y)`` chord errors. False = free BC integration (no ramp path).
+# a merge occurs). Merge uses ``SIM_TAKE_OFFRAMP`` or upper-half nav intent (see ``SIM_TAKE_OFFRAMP_UPPER_HALF_NAV``).
+# False = free BC integration (no ramp path).
 SIM_PROJECT_REF_ONTO_MAIN_ROAD = True
 # After each step, blend this fraction of the main-road heading into integrated ``psi`` (for kinematics only).
 SIM_BLEND_PSI_TO_MAIN_ROAD = 0.22
@@ -162,6 +173,18 @@ OFFRAMP_BRANCH_BEZIER_OVERRIDE_BY_Y_PX = {250.0: (185.0, 175.0, 295.0)}
 OFFRAMP_TANGENT_CTRL_PX = 95.0
 OFFRAMP_END_DX_PX = 210.0
 OFFRAMP_END_DY_PX = 265.0
+# Main road only: BEV sign placed this many **meters** of centerline arc **before** the first off-ramp
+# (travel toward decreasing ``y``). ``0`` disables.
+OFFRAMP_ADVANCE_SIGN_ARC_METERS_BEFORE = 50.0
+# Extra shift in BEV **+x** (pixels, right on the image) after the shoulder offset.
+OFFRAMP_ADVANCE_SIGN_OFFSET_RIGHT_PX = 75.0
+OFFRAMP_ADVANCE_SIGN_TEXT = "exit 114"
+OFFRAMP_ADVANCE_SIGN_TEXT_SECOND = "150 ft"
+# Second off-ramp (next merge toward decreasing ``y`` after the first). ``0`` disables.
+OFFRAMP_ADVANCE_SIGN_SECOND_ARC_METERS_BEFORE = 50.0
+OFFRAMP_ADVANCE_SIGN_SECOND_OFFSET_RIGHT_PX = 125.0
+OFFRAMP_ADVANCE_SIGN_SECOND_TEXT = "exit 117"
+OFFRAMP_ADVANCE_SIGN_SECOND_TEXT_SECOND = "150 ft"
 
 # --- Camera / perspective (generate_dataset.py) ---
 CAMERA_IMAGE_SIZE = 128

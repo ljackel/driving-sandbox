@@ -33,6 +33,43 @@ def _roadkill_obstacle_y_rows_all() -> tuple[float, ...]:
     return _roadkill_obstacle_y_rows_training() + _roadkill_obstacle_y_rows_eval_only()
 
 
+def _main_road_pose_arc_before_merge(
+    dw: "DrivingWorld",
+    y_merge: float,
+    arc_back_px: float,
+) -> tuple[float, float, float] | None:
+    """
+    Centerline ``(x, y)`` and heading ``psi`` (rad, same convention as ``simulate.initial_heading_road_aligned``)
+    after walking **backward** ``arc_back_px`` along the main spline from row ``y_merge`` (toward **larger** ``y`` /
+    map bottom — i.e. before the merge when driving forward).
+    """
+    if arc_back_px <= 0.0:
+        return None
+    y_lo = 1.0
+    y_hi = float(dw.size) - 1.0
+    y_c = float(np.clip(float(y_merge), y_lo, y_hi))
+    remaining = float(arc_back_px)
+    step_cap = 5.0
+    while remaining > 1e-4:
+        step = min(remaining, step_cap)
+        dxdy = float(dw.cs(y_c, nu=1))
+        dyd_s = -1.0 / float(np.sqrt(1.0 + dxdy * dxdy))
+        dy = -step * dyd_s
+        y_new = float(np.clip(y_c + dy, y_lo, y_hi))
+        if abs(y_new - y_c) < 1e-9:
+            break
+        arc_done = abs(y_new - y_c) / max(abs(dyd_s), 1e-12)
+        remaining -= arc_done
+        y_c = y_new
+    x_c = float(dw.get_road_center(y_c))
+    dxdy = float(dw.cs(y_c, nu=1))
+    norm = float(np.hypot(dxdy, 1.0))
+    fx = -dxdy / norm
+    fy = -1.0 / norm
+    psi = float(np.arctan2(fy, fx))
+    return x_c, y_c, psi
+
+
 def _raised_cosine01(t: float) -> float:
     """Hann ease 0→1; zero slope at both ends (gentler lane-change than polynomial ease)."""
     t = float(np.clip(t, 0.0, 1.0))
@@ -676,7 +713,94 @@ class DrivingWorld:
                 thickness=cfg.ROAD_EDGE_THICKNESS,
             )
 
-    def create_map(self):
+    def _draw_one_offramp_advance_sign(
+        self,
+        world: np.ndarray,
+        y_merge: float,
+        arc_meters: float,
+        dx_right_px: float,
+        line1: str,
+        line2: str,
+    ) -> None:
+        """Yellow BEV board before merge row ``y_merge``; ``arc_meters`` of centerline arc upstream."""
+        if arc_meters <= 0.0 or not line1:
+            return
+        arc_px = float(arc_meters) * float(self.px_per_m)
+        pose = _main_road_pose_arc_before_merge(self, float(y_merge), arc_px)
+        if pose is None:
+            return
+        x_c, y_c, psi = pose
+        lane_off = 0.42 * float(cfg.LANE_WIDTH_METERS * self.px_per_m)
+        rx = float(-np.sin(psi))
+        ry = float(np.cos(psi))
+        sx = int(round(x_c + rx * lane_off + float(dx_right_px)))
+        sy = int(round(y_c + ry * lane_off))
+        h, w = world.shape[:2]
+        line2 = line2.strip()
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        scale = 0.5
+        thick = 2
+        (tw1, th1), _ = cv2.getTextSize(line1, font, scale, thick)
+        if line2:
+            (tw2, th2), _ = cv2.getTextSize(line2, font, scale, thick)
+            line_gap = 6
+            total_h = th1 + line_gap + th2
+            tw = max(tw1, tw2)
+            baseline1 = int(round(sy - 0.5 * total_h + th1))
+            baseline2 = int(round(baseline1 + line_gap + th2))
+        else:
+            line_gap = 0
+            total_h = th1
+            tw = tw1
+            baseline1 = int(round(sy + th1 / 2))
+        pad = 8
+        half_w = max(44, (tw + 2 * pad) // 2)
+        half_h = max(18, (total_h + 2 * pad) // 2)
+        x1 = int(np.clip(sx - half_w, 0, w - 1))
+        y1 = int(np.clip(sy - half_h, 0, h - 1))
+        x2 = int(np.clip(sx + half_w, 0, w - 1))
+        y2 = int(np.clip(sy + half_h, 0, h - 1))
+        cv2.rectangle(world, (x1, y1), (x2, y2), (0, 240, 255), -1, cv2.LINE_AA)
+        cv2.rectangle(world, (x1, y1), (x2, y2), (30, 30, 30), 1, cv2.LINE_AA)
+        tx1 = int(np.clip(sx - tw1 // 2, 2, max(2, w - tw1 - 2)))
+        cv2.putText(
+            world, line1, (tx1, baseline1), font, scale, (15, 15, 15), thick, cv2.LINE_AA
+        )
+        if line2:
+            tx2 = int(np.clip(sx - tw2 // 2, 2, max(2, w - tw2 - 2)))
+            cv2.putText(
+                world, line2, (tx2, baseline2), font, scale, (15, 15, 15), thick, cv2.LINE_AA
+            )
+
+    def _draw_offramp_advance_signs(self, world: np.ndarray) -> None:
+        """BEV advance signs before the first and (if configured) second off-ramp merges."""
+        if not cfg.OFFRAMP_ENABLE:
+            return
+        branches = self.offramp_branch_y_pxs()
+        if not branches:
+            return
+        m1 = float(getattr(cfg, "OFFRAMP_ADVANCE_SIGN_ARC_METERS_BEFORE", 0.0))
+        if m1 > 0.0:
+            self._draw_one_offramp_advance_sign(
+                world,
+                float(branches[0]),
+                m1,
+                float(getattr(cfg, "OFFRAMP_ADVANCE_SIGN_OFFSET_RIGHT_PX", 0.0)),
+                str(getattr(cfg, "OFFRAMP_ADVANCE_SIGN_TEXT", "")),
+                str(getattr(cfg, "OFFRAMP_ADVANCE_SIGN_TEXT_SECOND", "")),
+            )
+        m2 = float(getattr(cfg, "OFFRAMP_ADVANCE_SIGN_SECOND_ARC_METERS_BEFORE", 0.0))
+        if m2 > 0.0 and len(branches) >= 2:
+            self._draw_one_offramp_advance_sign(
+                world,
+                float(branches[1]),
+                m2,
+                float(getattr(cfg, "OFFRAMP_ADVANCE_SIGN_SECOND_OFFSET_RIGHT_PX", 0.0)),
+                str(getattr(cfg, "OFFRAMP_ADVANCE_SIGN_SECOND_TEXT", "")),
+                str(getattr(cfg, "OFFRAMP_ADVANCE_SIGN_SECOND_TEXT_SECOND", "")),
+            )
+
+    def create_map(self) -> np.ndarray:
         """Paint grass, a thick gray polyline for pavement, and white dash segments."""
         world = np.zeros((self.size, self.size, 3), dtype=np.uint8)
         world[:] = cfg.WORLD_GREEN_BGR
@@ -715,6 +839,7 @@ class DrivingWorld:
                         dash_len=dash_len,
                         dash_gap=dash_gap,
                     )
+        self._draw_offramp_advance_signs(world)
         self._draw_roadkill_obstacles(world)
         # Orientation: top of image is y=0 (small y); blue stripe marks that edge for debugging.
         cv2.line(
