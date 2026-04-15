@@ -360,11 +360,14 @@ def _ego_lateral_offset_px_at_y(
     on_ramp: bool = False,
     w_bot_override: float | None = None,
     skip_slow_bot: bool = False,
+    slow_bot_y_arc_chain: list[float | None] | None = None,
 ) -> float:
     """Camera/ego offset from centerline (px); roadkill detour applies only on the main road.
 
     ``w_bot_override``: if set, skip slow-bot lookup and use this blend weight (see
     ``_world_bgr_composite_slow_bot_w``). ``skip_slow_bot``: omit bot (cheap paths that do not need pass-around).
+    ``slow_bot_y_arc_chain``: optional single-element list ``[y_bot_row]`` updated in-place to chain hints
+    along the BEV trail (oldest sample first).
     """
     if on_ramp:
         base = float(cfg.offramp_camera_lateral_offset_px(dw.px_per_m))
@@ -385,9 +388,14 @@ def _ego_lateral_offset_px_at_y(
             * cfg.DATASET_RIGHT_LANE_LATERAL_FRAC
             * dw.px_per_m
         )
-        w_bot, _, _, _ = slow_bot_car_pass_blend_and_pose(
-            float(y), dw, y_ref, r_lane
+        hint = None
+        if slow_bot_y_arc_chain is not None and slow_bot_y_arc_chain:
+            hint = slow_bot_y_arc_chain[0]
+        w_bot, _, _, _, y_br = slow_bot_car_pass_blend_and_pose(
+            float(y), dw, y_ref, r_lane, y_arc_hint=hint
         )
+        if slow_bot_y_arc_chain is not None and y_br is not None:
+            slow_bot_y_arc_chain[0] = float(y_br)
     else:
         w_bot = 0.0
     return lateral_offset_px_avoid_roadkill(
@@ -410,24 +418,29 @@ def _world_bgr_composite_slow_bot_w(
     *,
     on_ramp: bool,
     map_h: int,
-) -> tuple[np.ndarray, float]:
-    """Map layer for FP/BEV plus slow-bot pass blend at ``y`` (reuse for lateral to avoid duplicate work)."""
+    y_arc_hint: float | None = None,
+) -> tuple[np.ndarray, float, float | None]:
+    """Map layer for FP/BEV plus slow-bot pass blend at ``y`` (reuse for lateral to avoid duplicate work).
+
+    Returns ``(layer, w_bot, y_bot_row)`` with ``y_bot_row`` the solved centerline row for the bot
+    (``None`` when the bot is off-map or disabled).
+    """
     if on_ramp or not bool(getattr(cfg, "BOT_CAR_ENABLE", False)):
-        return world_bgr, 0.0
+        return world_bgr, 0.0, None
     y_ref = float(map_h) - float(cfg.DATASET_MAP_MARGIN)
     r_lane = float(
         cfg.LANE_WIDTH_METERS
         * cfg.DATASET_RIGHT_LANE_LATERAL_FRAC
         * dw.px_per_m
     )
-    w_bot, qx, qy, ppsi = slow_bot_car_pass_blend_and_pose(
-        float(y), dw, y_ref, r_lane
+    w_bot, qx, qy, ppsi, y_br = slow_bot_car_pass_blend_and_pose(
+        float(y), dw, y_ref, r_lane, y_arc_hint=y_arc_hint
     )
     if qx is None:
-        return world_bgr, 0.0
+        return world_bgr, 0.0, None
     out = world_bgr.copy()
     draw_slow_bot_car_bev(out, qx, qy, ppsi, float(dw.px_per_m))
-    return out, float(w_bot)
+    return out, float(w_bot), y_br
 
 
 def _draw_lateral_sampling_bar(
@@ -625,6 +638,54 @@ def _bev_draw_nav_instruction_box(
     return int(y2)
 
 
+def _bev_nav_box_bottom_y(text: str, *, h_map: int, x0: int = 10, y0: int = 8) -> int:
+    """Same vertical extent as ``_bev_draw_nav_instruction_box`` (no drawing)."""
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    scale = 0.58
+    thick = 2
+    pad_x, pad_y = 10, 8
+    (tw, th), baseline = cv2.getTextSize(text, font, scale, thick)
+    x1, y1 = x0, y0
+    y_baseline = y1 + pad_y + th
+    x2 = x1 + tw + 2 * pad_x
+    y2 = y_baseline + baseline + pad_y
+    y2 = min(y2, h_map - 8)
+    return int(y2)
+
+
+def _bev_overlay_step_hud(
+    vis: np.ndarray,
+    *,
+    step_idx: int,
+    below_nav: int,
+    extra_hint: str | None,
+) -> None:
+    line1_y = 26 if below_nav == 0 else below_nav + 18
+    line1 = f"step {step_idx}   Space pause   q quit   Ctrl+C (terminal)"
+    cv2.putText(
+        vis,
+        line1,
+        (10, line1_y),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.65,
+        (255, 255, 255),
+        2,
+        cv2.LINE_AA,
+    )
+    if extra_hint:
+        hint_y = line1_y + 26
+        cv2.putText(
+            vis,
+            extra_hint,
+            (10, hint_y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (180, 255, 220),
+            2,
+            cv2.LINE_AA,
+        )
+
+
 def _bev_nav_exit_active(y_img: float, h_map: int) -> bool:
     """True when geographic nav is enabled and ego row ``y_img`` is in the upper half of a ``h_map``-tall BEV."""
     if not bool(cfg.SIM_TAKE_OFFRAMP_UPPER_HALF_NAV):
@@ -664,25 +725,30 @@ def _bev_realtime_frame(
         bot_layer = bot_visual_base
     else:
         bot_layer = _world_bgr_composite_slow_bot_w(
-            world_bgr, dw, float(y), on_ramp=on_ramp, map_h=map_h
+            world_bgr,
+            dw,
+            float(y),
+            on_ramp=on_ramp,
+            map_h=map_h,
+            y_arc_hint=None,
         )[0]
     vis = world_bgr.copy() if bot_layer is world_bgr else bot_layer
     if len(path) >= 2:
         n = len(path)
         max_pts = max(2, int(getattr(cfg, "SIM_BEV_TRAIL_MAX_POINTS", 400)))
         last_i = n - 1
-        # Each trail vertex runs roadkill + slow-bot lateral (expensive). While ``n <= max_pts``,
-        # use every point (cost grows linearly with step count — early runs feel faster). Beyond
-        # that, subsample with ``ceil(last_i / (max_pts-1))``; floor ``(n-1)//(max_pts-1)`` can stay
-        # 1 when ``n`` is only slightly above ``max_pts``, so cost never capped (run keeps slowing).
-        den = max(1, max_pts - 1)
-        if last_i <= den:
-            step_i = 1
-        else:
-            step_i = max(1, (last_i + den - 1) // den)
-        idxs = list(range(0, last_i, step_i))
+        num_samples = min(n, max_pts)
+        raw = np.linspace(0.0, float(last_i), num=num_samples, dtype=np.float64)
+        idxs = sorted({int(round(float(x))) for x in raw})
+        if idxs[0] != 0:
+            idxs.insert(0, 0)
         if idxs[-1] != last_i:
             idxs.append(last_i)
+        idxs = sorted(set(idxs))
+        trail_slow_bot = bool(
+            getattr(cfg, "SIM_BEV_TRAIL_INCLUDE_SLOW_BOT", True)
+        )
+        trail_y_chain: list[float | None] = [None]
         qs = np.empty((len(idxs), 2), dtype=np.float32)
         for j, i in enumerate(idxs):
             xc, yc, _psi, on_r, ur, rid = path[i]
@@ -694,6 +760,10 @@ def _bev_realtime_frame(
                 float(xc),
                 float(psi_d),
                 on_ramp=bool(on_r),
+                skip_slow_bot=not trail_slow_bot,
+                slow_bot_y_arc_chain=(
+                    trail_y_chain if trail_slow_bot and not on_r else None
+                ),
             )
             qx, qy = _right_lane_overlay_xy(float(xc), float(yc), psi_d, lat_i)
             qs[j, 0] = qx
@@ -706,30 +776,12 @@ def _bev_realtime_frame(
     if nav_exit_active and nav_exit_text:
         below_nav = _bev_draw_nav_instruction_box(vis, nav_exit_text)
     if show_step_hud:
-        line1_y = 26 if below_nav == 0 else below_nav + 18
-        line1 = f"step {len(path) - 1}   Space pause   q quit   Ctrl+C (terminal)"
-        cv2.putText(
+        _bev_overlay_step_hud(
             vis,
-            line1,
-            (10, line1_y),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.65,
-            (255, 255, 255),
-            2,
-            cv2.LINE_AA,
+            step_idx=len(path) - 1,
+            below_nav=below_nav,
+            extra_hint=extra_hint,
         )
-        if extra_hint:
-            hint_y = line1_y + 26
-            cv2.putText(
-                vis,
-                extra_hint,
-                (10, hint_y),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.55,
-                (180, 255, 220),
-                2,
-                cv2.LINE_AA,
-            )
     return vis
 
 
@@ -1375,6 +1427,7 @@ def run_simulation() -> tuple[
     path: list[SimPathPoint] = [_sim_path_point(x0, y0, psi)]
     x, y = x0, y0
     base_step_dist_px = cfg.SIM_SPEED_M_S * cfg.SIM_DT * px_per_m
+    last_slow_bot_y_row: float | None = None
 
     off_ok = dw.offramp_num() > 0
     ramp_kinematics = (
@@ -1486,11 +1539,17 @@ def run_simulation() -> tuple[
                 break
             rt_ui["sim_step"] = sim_i
             t_sim = float(sim_i) * float(cfg.SIM_DT)
-            print(
-                f"\rsimulation step {sim_i}  (sim time {t_sim:.3f} s)",
-                end="",
-                flush=True,
-            )
+            t_step_begin = time.perf_counter()
+
+            def _print_sim_step_timing(note: str = "") -> None:
+                dt_ms = (time.perf_counter() - t_step_begin) * 1000.0
+                extra = f"  [{note}]" if note else ""
+                print(
+                    f"sim step {sim_i}  wall {dt_ms:.2f} ms  sim_t {t_sim:.3f} s  "
+                    f"|path| {len(path)}{extra}",
+                    flush=True,
+                )
+
             step_dist_px = base_step_dist_px * float(rt_ui.get("speed_scale", 1.0))
             y_for_model = float(y)
             if cfg.SIM_TAKE_OFFRAMP_UPPER_HALF_NAV:
@@ -1508,13 +1567,19 @@ def run_simulation() -> tuple[
             if on_ramp:
                 ev_pose = dw.offramp_bezier_evolution(u_ramp, ramp_id)
                 if ev_pose is None:
+                    _print_sim_step_timing("exit: offramp ev_pose None")
                     break
                 _, (fx, fy), _ = ev_pose
                 psi_cam = float(np.arctan2(fy, fx))
             else:
                 psi_cam = initial_heading_road_aligned(dw.cs, y)
-            world_cam, w_bot_fp = _world_bgr_composite_slow_bot_w(
-                world, dw, float(y), on_ramp=on_ramp, map_h=h
+            world_cam, w_bot_fp, y_br_pre = _world_bgr_composite_slow_bot_w(
+                world,
+                dw,
+                float(y),
+                on_ramp=on_ramp,
+                map_h=h,
+                y_arc_hint=last_slow_bot_y_row,
             )
             view = get_view_from_pose(
                 world_cam,
@@ -1532,8 +1597,9 @@ def run_simulation() -> tuple[
                 ),
             )
             if view is None:
+                _print_sim_step_timing("exit: get_view_from_pose None")
                 break
-    
+
             if fp_video_abs is not None:
                 vframe = _fp_video_frame_bgr(view)
                 vh, vw = vframe.shape[:2]
@@ -1566,6 +1632,7 @@ def run_simulation() -> tuple[
                         u_ramp, step_dist_px, ramp_id
                     )
                     if step_r is None:
+                        _print_sim_step_timing("exit: offramp_step_arc_px None")
                         break
                     u_ramp, x, y = step_r
                 elif ramp_kinematics and not on_ramp:
@@ -1634,9 +1701,22 @@ def run_simulation() -> tuple[
                 "margin": margin,
                 "ramp_kinematics": ramp_kinematics,
             }
-            world_cam_post, w_bot_post = _world_bgr_composite_slow_bot_w(
-                world, dw, float(y), on_ramp=on_ramp, map_h=h
+            world_cam_post, w_bot_post, y_br_post = _world_bgr_composite_slow_bot_w(
+                world,
+                dw,
+                float(y),
+                on_ramp=on_ramp,
+                map_h=h,
+                y_arc_hint=(
+                    y_br_pre
+                    if y_br_pre is not None
+                    else last_slow_bot_y_row
+                ),
             )
+            if on_ramp:
+                last_slow_bot_y_row = None
+            elif y_br_post is not None:
+                last_slow_bot_y_row = float(y_br_post)
             lat_hit = _ego_lateral_offset_px_at_y(
                 dw,
                 float(y),
@@ -1652,7 +1732,18 @@ def run_simulation() -> tuple[
             rt_ui["ego_hit_xy"] = (int(round(qx_hit)), int(round(qy_hit)))
             rt_ui["ego_grab_radius_px"] = _bev_ego_grab_radius_px(float(dw.px_per_m))
 
-            if bev_video_abs is not None:
+            live_bev = cfg.SIM_REALTIME_BEV and not rt_gui_disabled
+            live_drv = cfg.SIM_REALTIME_DRIVER_VIEW and not rt_gui_disabled
+
+            bev_fr: np.ndarray | None = None
+            want_bev_mp4 = bev_video_abs is not None
+            bev_hud_on_shared_frame = live_bev and not want_bev_mp4
+            if want_bev_mp4 or live_bev:
+                bev_hint_shared = (
+                    "PAUSED: drag ego car to move, release on road"
+                    if (bev_hud_on_shared_frame and rt_sim_paused)
+                    else None
+                )
                 bev_fr = _bev_realtime_frame(
                     world,
                     dw,
@@ -1664,31 +1755,31 @@ def run_simulation() -> tuple[
                     on_ramp=on_ramp,
                     map_h=h,
                     bot_visual_base=world_cam_post,
+                    extra_hint=bev_hint_shared,
                     nav_exit_active=_bev_nav_exit_active(float(y), h),
                     nav_exit_text=str(cfg.SIM_NAV_EXIT_INSTRUCTION_TEXT),
-                    show_step_hud=False,
+                    show_step_hud=bev_hud_on_shared_frame,
                 )
-                bvh, bvw = bev_fr.shape[:2]
-                if bev_video_writer is None:
-                    bev_video_writer = cv2.VideoWriter(
-                        bev_video_abs,
-                        cv2.VideoWriter_fourcc(*"mp4v"),
-                        float(cfg.SIM_VIDEO_FPS),
-                        (bvw, bvh),
-                    )
-                    if not bev_video_writer.isOpened():
-                        print(
-                            f"Warning: could not open BEV video writer for {bev_video_abs!r}; "
-                            "skipping bird's-eye MP4.",
-                            file=sys.stderr,
+                if bev_video_abs is not None:
+                    bvh, bvw = bev_fr.shape[:2]
+                    if bev_video_writer is None:
+                        bev_video_writer = cv2.VideoWriter(
+                            bev_video_abs,
+                            cv2.VideoWriter_fourcc(*"mp4v"),
+                            float(cfg.SIM_VIDEO_FPS),
+                            (bvw, bvh),
                         )
-                        bev_video_abs = None
-                        bev_video_writer = None
-                if bev_video_writer is not None:
-                    bev_video_writer.write(bev_fr)
+                        if not bev_video_writer.isOpened():
+                            print(
+                                f"Warning: could not open BEV video writer for {bev_video_abs!r}; "
+                                "skipping bird's-eye MP4.",
+                                file=sys.stderr,
+                            )
+                            bev_video_abs = None
+                            bev_video_writer = None
+                    if bev_video_writer is not None:
+                        bev_video_writer.write(bev_fr)
 
-            live_bev = cfg.SIM_REALTIME_BEV and not rt_gui_disabled
-            live_drv = cfg.SIM_REALTIME_DRIVER_VIEW and not rt_gui_disabled
             if live_bev or live_drv:
                 try:
                     view_live = get_view_from_pose(
@@ -1699,6 +1790,7 @@ def run_simulation() -> tuple[
                         lat_hit,
                     )
                     if view_live is None:
+                        _print_sim_step_timing("exit: view_live None")
                         break
                     vframe = _fp_video_frame_bgr(view_live)
                     fr: np.ndarray | None = None
@@ -1728,26 +1820,52 @@ def run_simulation() -> tuple[
                                 _rt_mouse_bev,
                                 rt_ui,
                             )
-                        bev_hint = (
-                            "PAUSED: drag ego car to move, release on road"
-                            if rt_sim_paused
-                            else None
-                        )
-                        fr = _bev_realtime_frame(
-                            world,
-                            dw,
-                            path,
-                            x,
-                            y,
-                            psi_draw,
-                            lat_hit,
-                            on_ramp=on_ramp,
-                            map_h=h,
-                            bot_visual_base=world_cam_post,
-                            extra_hint=bev_hint,
-                            nav_exit_active=_bev_nav_exit_active(float(y), h),
-                            nav_exit_text=str(cfg.SIM_NAV_EXIT_INSTRUCTION_TEXT),
-                        )
+                        if bev_fr is None:
+                            bev_hint = (
+                                "PAUSED: drag ego car to move, release on road"
+                                if rt_sim_paused
+                                else None
+                            )
+                            fr = _bev_realtime_frame(
+                                world,
+                                dw,
+                                path,
+                                x,
+                                y,
+                                psi_draw,
+                                lat_hit,
+                                on_ramp=on_ramp,
+                                map_h=h,
+                                bot_visual_base=world_cam_post,
+                                extra_hint=bev_hint,
+                                nav_exit_active=_bev_nav_exit_active(
+                                    float(y), h
+                                ),
+                                nav_exit_text=str(
+                                    cfg.SIM_NAV_EXIT_INSTRUCTION_TEXT
+                                ),
+                            )
+                        else:
+                            fr = bev_fr.copy()
+                        if want_bev_mp4:
+                            nav_active = _bev_nav_exit_active(float(y), h)
+                            nav_txt = str(cfg.SIM_NAV_EXIT_INSTRUCTION_TEXT)
+                            below_nav = (
+                                _bev_nav_box_bottom_y(nav_txt, h_map=h)
+                                if (nav_active and nav_txt)
+                                else 0
+                            )
+                            pause_hint = (
+                                "PAUSED: drag ego car to move, release on road"
+                                if rt_sim_paused
+                                else None
+                            )
+                            _bev_overlay_step_hud(
+                                fr,
+                                step_idx=len(path) - 1,
+                                below_nav=below_nav,
+                                extra_hint=pause_hint,
+                            )
                         _rt_draw_speed_slider(fr, rt_ui)
                     if not rt_windows_placed:
                         _tile_realtime_sim_windows(fr, drv)
@@ -1775,15 +1893,20 @@ def run_simulation() -> tuple[
                                     ramp_id=ramp_id,
                                 )
                             )
-                            world_cam_post, w_bot_post = (
+                            world_cam_post, w_bot_post, y_br_reloc = (
                                 _world_bgr_composite_slow_bot_w(
                                     world,
                                     dw,
                                     float(y),
                                     on_ramp=on_ramp,
                                     map_h=h,
+                                    y_arc_hint=last_slow_bot_y_row,
                                 )
                             )
+                            if not on_ramp and y_br_reloc is not None:
+                                last_slow_bot_y_row = float(y_br_reloc)
+                            elif on_ramp:
+                                last_slow_bot_y_row = None
                             lat_hit = _ego_lateral_offset_px_at_y(
                                 dw,
                                 float(y),
@@ -1853,12 +1976,15 @@ def run_simulation() -> tuple[
                             disp_x = float(prv["x"])
                             disp_y = float(prv["y"])
                             disp_psi_draw = float(prv["psi"])
-                            disp_bev_base, w_bot_pv = _world_bgr_composite_slow_bot_w(
-                                world,
-                                dw,
-                                float(disp_y),
-                                on_ramp=on_ramp_for_bev,
-                                map_h=h,
+                            disp_bev_base, w_bot_pv, _y_br_pv = (
+                                _world_bgr_composite_slow_bot_w(
+                                    world,
+                                    dw,
+                                    float(disp_y),
+                                    on_ramp=on_ramp_for_bev,
+                                    map_h=h,
+                                    y_arc_hint=last_slow_bot_y_row,
+                                )
                             )
                             disp_lat = _ego_lateral_offset_px_at_y(
                                 dw,
@@ -1946,6 +2072,7 @@ def run_simulation() -> tuple[
                             break
                         continue
                     if user_quit_rt:
+                        _print_sim_step_timing("quit: realtime UI")
                         break
                     if pause_ms > 0 and not interrupt_rt[0]:
                         rem = pause_ms / 1000.0
@@ -1956,6 +2083,7 @@ def run_simulation() -> tuple[
                         if interrupt_rt[0]:
                             user_quit_rt = True
                     if user_quit_rt:
+                        _print_sim_step_timing("quit: realtime UI")
                         break
                 except cv2.error:
                     if not rt_gui_disabled:
@@ -1978,14 +2106,14 @@ def run_simulation() -> tuple[
                         except cv2.error:
                             pass
                         rt_driver_window = False
-    
+
+            _print_sim_step_timing()
             if on_ramp and u_ramp >= 1.0 - 1e-8:
                 break
             if (not on_ramp) and cfg.SIM_STOP_WHEN_REACHES_MAP_TOP and float(y) <= margin:
                 break
             if x < 0 or x >= w or y < 0 or float(y) >= float(h):
                 break
-        print()
     finally:
         if _prev_sigint is not None:
             signal.signal(signal.SIGINT, _prev_sigint)
@@ -2011,8 +2139,13 @@ def run_simulation() -> tuple[
                 psi_end = initial_heading_road_aligned(dw.cs, y)
         else:
             psi_end = initial_heading_road_aligned(dw.cs, y)
-        world_end, w_bot_end = _world_bgr_composite_slow_bot_w(
-            world, dw, float(y), on_ramp=on_ramp, map_h=h
+        world_end, w_bot_end, _ = _world_bgr_composite_slow_bot_w(
+            world,
+            dw,
+            float(y),
+            on_ramp=on_ramp,
+            map_h=h,
+            y_arc_hint=last_slow_bot_y_row,
         )
         view_end = get_view_from_pose(
             world_end,
@@ -2065,12 +2198,13 @@ def main() -> None:
         psi_draw_l = _path_point_psi_draw(
             dw_overlay, xl, yl, onl, ul, ridl
         )
-        world_bot_l, w_bot_l = _world_bgr_composite_slow_bot_w(
+        world_bot_l, w_bot_l, _ = _world_bgr_composite_slow_bot_w(
             world_bgr,
             dw_overlay,
             float(yl),
             on_ramp=bool(onl),
             map_h=h_map,
+            y_arc_hint=None,
         )
         lat_l = _ego_lateral_offset_px_at_y(
             dw_overlay,

@@ -207,6 +207,13 @@ BOT_CAR_CORE_ARC_M = 16.0
 BOT_CAR_EXIT_ARC_M = 36.0
 # BEV slow-bot footprint vs ego: ``1.0`` = same width as ``SIM_BEV_EGO_CAR_WIDTH_M`` (shared draw path).
 BOT_CAR_BEV_WIDTH_SCALE = 1.0
+# Arc-length quadrature for slow-bot kinematics (``slow_bot_car_pass_blend_and_pose``). Lower = faster in
+# sim / BEV trail; dataset spacing and other arc uses still default to ~2000 samples.
+SIM_SLOW_BOT_ARC_N_FINE = 320
+SIM_SLOW_BOT_Y_AT_ARC_ITER = 36
+# Inverse arc-length solve: Newton steps when a previous bot row is known; then bisection if needed.
+SIM_SLOW_BOT_ARC_NEWTON_MAX = 10
+SIM_SLOW_BOT_ARC_NEWTON_TOL_PX = 0.25
 # Off-ramp geometry (see ``OFFRAMP_ENABLE`` in switches): branch on main centerline; image-row fraction
 # (0 = top, 1 = bottom). Must be > 0.5 for bottom-half exit; ignored otherwise.
 OFFRAMP_BRANCH_Y_FRAC = 0.78
@@ -465,7 +472,7 @@ def offramp_camera_lateral_offset_px(px_per_m: float) -> float:
 
 
 # Live BEV / ``sim_path.png`` (written under ``runs/<timestamp>_sim/``): top-down ego footprint (meters, full scale on the map).
-SIM_BEV_EGO_CAR_WIDTH_M = 1.
+SIM_BEV_EGO_CAR_WIDTH_M = 1.5
 SIM_BEV_EGO_CAR_LENGTH_M = 3.0
 # If the true size in pixels is smaller than this length (px), scale the icon up uniformly
 # (keeps 1.5 m × 3 m proportions; set0 to always use exact map scale).
@@ -478,8 +485,11 @@ SIM_FP_VIDEO_FILENAME = "sim_first_person.mp4"
 SIM_BEV_VIDEO_FILENAME = "sim_bev.mp4"
 # Final bird's-eye PNG after a run: full pink trail + ego at last pose (matches live BEV, not ``sim_path.png``).
 SIM_BEV_PATH_IMAGE_FILENAME = "sim_bev_path.png"
-# Cap polyline vertices for the BEV trail (subsamples long paths; speeds ``_bev_realtime_frame``).
-SIM_BEV_TRAIL_MAX_POINTS = 384
+# Cap polyline vertices for the BEV trail (each vertex runs roadkill + optional slow-bot lateral).
+# Lower = faster; raise for a smoother trail on long runs.
+SIM_BEV_TRAIL_MAX_POINTS = 160
+# When False, trail lateral skips slow-bot blend (cheaper; trail may not show pass-around geometry).
+SIM_BEV_TRAIL_INCLUDE_SLOW_BOT = True
 # Playback speed matches one simulation step per frame (``1 / SIM_DT``).
 SIM_VIDEO_FPS = 1.0 / SIM_DT
 # ``SIM_REALTIME_BEV`` / ``SIM_REALTIME_DRIVER_VIEW``: set by ``MAX_SIM_SPEED`` / ``_CUSTOM_SIM_*`` at top.

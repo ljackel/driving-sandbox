@@ -325,7 +325,7 @@ def _world_main_road_with_bot_and_lateral(
     Roadkill visibility uses the base ``world`` (no bot) so splat gating is unchanged.
     """
     y_ref = float(map_size) - float(margin)
-    w_bot, qx, qy, ppsi = slow_bot_car_pass_blend_and_pose(
+    w_bot, qx, qy, ppsi, _ = slow_bot_car_pass_blend_and_pose(
         float(yf), dw, y_ref, right_lane_offset_px
     )
     world_use = world

@@ -432,7 +432,9 @@ def slow_bot_car_pass_blend_and_pose(
     dw: DrivingWorld,
     y_ref_bottom: float,
     right_lane_offset_px: float,
-) -> tuple[float, float | None, float | None, float | None]:
+    *,
+    y_arc_hint: float | None = None,
+) -> tuple[float, float | None, float | None, float | None, float | None]:
     """
     Arc-length slow-bot kinematics vs ego, left-lane pass blend, and right-lane BEV pose for drawing.
 
@@ -441,17 +443,25 @@ def slow_bot_car_pass_blend_and_pose(
     uses arc to ``y_ref_bottom + DATASET_MAP_MARGIN - 1`` there so ``sigma_b`` still increases with
     forward motion.
 
+    ``y_arc_hint``: previous solved bot row for ``centerline_y_at_arc_from_bottom`` (last step or prior
+    trail sample); speeds up the inverse arc-length solve.
+
     Returns:
-        ``(w_pass, qx, qy, psi)`` with ``None`` pose when the bot is off-map or feature disabled.
+        ``(w_pass, qx, qy, psi, y_bot_row)`` with ``None`` pose / row when the bot is off-map or
+        feature disabled.
     """
     if not bool(getattr(cfg, "BOT_CAR_ENABLE", False)):
-        return (0.0, None, None, None)
+        return (0.0, None, None, None, None)
     px_per_m = float(dw.px_per_m)
+    arc_nf = int(getattr(cfg, "SIM_SLOW_BOT_ARC_N_FINE", 320))
+    arc_ni = int(getattr(cfg, "SIM_SLOW_BOT_Y_AT_ARC_ITER", 36))
+    arc_newton_max = int(getattr(cfg, "SIM_SLOW_BOT_ARC_NEWTON_MAX", 10))
+    arc_newton_tol = float(getattr(cfg, "SIM_SLOW_BOT_ARC_NEWTON_TOL_PX", 0.25))
     head_px = float(cfg.BOT_CAR_HEAD_START_M) * px_per_m
     rel = float(cfg.BOT_CAR_REL_SPEED)
     y_top = float(cfg.DATASET_MAP_MARGIN)
     s_full = centerline_arc_length_between_rows(
-        dw.cs, y_top, float(y_ref_bottom)
+        dw.cs, y_top, float(y_ref_bottom), n_fine=arc_nf
     )
     frac = float(
         np.clip(
@@ -469,14 +479,14 @@ def slow_bot_car_pass_blend_and_pose(
     # at ``y_ref`` both pieces match. Past ``y_ref``, keep the original arc-to-ref odometer.
     y_odom_bottom = float(y_ref_bottom) + float(cfg.DATASET_MAP_MARGIN) - 1.0
     d_odom = centerline_arc_length_between_rows(
-        dw.cs, float(y_ref_bottom), y_odom_bottom
+        dw.cs, float(y_ref_bottom), y_odom_bottom, n_fine=arc_nf
     )
     sigma_e_ref = centerline_arc_length_between_rows(
-        dw.cs, float(y_ego), float(y_ref_bottom)
+        dw.cs, float(y_ego), float(y_ref_bottom), n_fine=arc_nf
     )
     if float(y_ego) > float(y_ref_bottom):
         sigma_e_odom = centerline_arc_length_between_rows(
-            dw.cs, float(y_ego), y_odom_bottom
+            dw.cs, float(y_ego), y_odom_bottom, n_fine=arc_nf
         )
         sigma_b = float(sigma_start) + rel * (
             float(sigma_e_odom) - float(d_odom)
@@ -484,21 +494,29 @@ def slow_bot_car_pass_blend_and_pose(
     else:
         sigma_b = float(sigma_start) + rel * float(sigma_e_ref)
     y_bot_row = centerline_y_at_arc_from_bottom(
-        dw.cs, float(y_ref_bottom), sigma_b, y_top
+        dw.cs,
+        float(y_ref_bottom),
+        sigma_b,
+        y_top,
+        n_iter=arc_ni,
+        n_fine=arc_nf,
+        y_hint=y_arc_hint,
+        newton_max=arc_newton_max,
+        newton_tol_px=arc_newton_tol,
     )
     if (
         not np.isfinite(y_bot_row)
         or y_bot_row < y_top
         or y_bot_row > float(y_ref_bottom) - 1.0
     ):
-        return (0.0, None, None, None)
+        return (0.0, None, None, None, None)
     x_c = float(dw.get_road_center(y_bot_row))
     dxdY = float(dw.cs(y_bot_row, nu=1))
     psi = _psi_road_from_dxdY(dxdY)
     gap = float(sigma_b - sigma_e_ref)
     w = _slow_bot_pass_blend_weight(gap, px_per_m)
     qx, qy = _right_lane_bev_xy(x_c, y_bot_row, psi, float(right_lane_offset_px))
-    return (w, float(qx), float(qy), float(psi))
+    return (w, float(qx), float(qy), float(psi), float(y_bot_row))
 
 
 def lateral_offset_px_avoid_roadkill(

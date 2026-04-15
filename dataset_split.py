@@ -288,28 +288,67 @@ def centerline_y_at_arc_from_bottom(
     y_top: float,
     *,
     n_iter: int = 48,
+    n_fine: int | None = None,
+    y_hint: float | None = None,
+    newton_max: int = 10,
+    newton_tol_px: float = 0.25,
 ) -> float:
     """
     Row ``y`` in ``[y_top, y_ref_bottom]`` such that arc length along the centerline from ``y`` to
     ``y_ref_bottom`` equals ``sigma_target`` (traffic toward decreasing ``y`` / map top).
 
+    This is an **inverse** map (target arc length → row): there is no closed form for a cubic-spline
+    centerline, so we solve ``L(y) = σ`` with ``L`` monotone. A **binary search** is the robust default.
+
+    When ``y_hint`` is a row near the solution (e.g. the bot row from the previous sim step or the
+    previous trail sample), a few **Newton** steps use ``dL/dy = -√(1 + (dx/dy)²)`` and typically
+    converge in a handful of quadrature evaluations instead of many bisection steps.
+
     ``y_top`` is the smallest valid row (map top inset); ``y_ref_bottom`` is the reference row at the
     drivable bottom (e.g. ``WORLD_IMAGE_SIZE - DATASET_MAP_MARGIN``).
+
+    ``n_fine`` overrides arc-length quadrature samples (default matches ``centerline_arc_length_between_rows``).
     """
     sigma_target = float(max(0.0, sigma_target))
     lo = float(min(y_top, y_ref_bottom))
     hi = float(max(y_top, y_ref_bottom))
     if hi <= lo + 1e-9:
         return float(lo)
-    s_max = centerline_arc_length_between_rows(cs, lo, y_ref_bottom)
+    s_max = centerline_arc_length_between_rows(
+        cs, lo, y_ref_bottom, n_fine=n_fine
+    )
     if sigma_target >= s_max - 1e-6:
         return float(lo)
     if sigma_target <= 1e-9:
         return float(hi)
+    eps = 1e-9
+    y_lo = lo + eps
+    y_hi = hi - eps
+    if y_hi <= y_lo:
+        y_lo, y_hi = lo, hi
+
+    if y_hint is not None and np.isfinite(float(y_hint)):
+        y = float(np.clip(float(y_hint), y_lo, y_hi))
+        for _ in range(int(max(1, newton_max))):
+            s_y = centerline_arc_length_between_rows(
+                cs, y, y_ref_bottom, n_fine=n_fine
+            )
+            err = float(s_y - sigma_target)
+            if abs(err) <= float(newton_tol_px):
+                return float(y)
+            dxdy = float(cs(y, nu=1))
+            d_ldy = -float(np.sqrt(1.0 + dxdy * dxdy))
+            if abs(d_ldy) < 1e-12:
+                break
+            y = y - err / d_ldy
+            y = float(np.clip(y, y_lo, y_hi))
+
     low, high = lo, hi
     for _ in range(int(n_iter)):
         mid = 0.5 * (low + high)
-        s_mid = centerline_arc_length_between_rows(cs, mid, y_ref_bottom)
+        s_mid = centerline_arc_length_between_rows(
+            cs, mid, y_ref_bottom, n_fine=n_fine
+        )
         if s_mid > sigma_target:
             low = mid
         else:
