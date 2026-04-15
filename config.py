@@ -200,13 +200,16 @@ OFFRAMP_BRANCH_Y_FRAC = 0.78
 # Sorted with the primary branch by ``y`` (descending): first encountered when driving from the map bottom.
 OFFRAMP_EXTRA_BRANCH_Y_PX = (250.0,)
 # Optional per branch row: ``y`` (px) → ``(tangent_ctrl_px, end_dx_px, end_dy_px)`` for a gentler/sharper peel.
-# Longer ``tangent_ctrl`` + moderate ``end_dx`` yields a gradual exit toward +x (driver's right in BEV).
-OFFRAMP_BRANCH_BEZIER_OVERRIDE_BY_Y_PX = {250.0: (185.0, 175.0, 295.0)}
+# Same sign convention as ``OFFRAMP_END_*``: **+Δx** right, **negative Δy** toward top. The row ``250`` branch is
+# already high on the map, so use a **smaller** |Δy| than the primary ramp so ``p2`` stays in-bounds.
+OFFRAMP_BRANCH_BEZIER_OVERRIDE_BY_Y_PX = {250.0: (120.0, 340.0, -200.0)}
 # Quadratic Bézier from branch: control point lies ``OFFRAMP_TANGENT_CTRL_PX`` along the **main-road tangent**
 # (traffic toward decreasing ``y``) so the merge is not a sharp kink; end vertex is branch + (Δx, Δy).
-OFFRAMP_TANGENT_CTRL_PX = 95.0
-OFFRAMP_END_DX_PX = 210.0
-OFFRAMP_END_DY_PX = 265.0
+# BEV pixels: **+x** = right, **+y** = down. Primary off-ramp uses **+Δx** / **negative Δy** (upper-right); the
+# extra branch uses the override dict above with the same intent.
+OFFRAMP_TANGENT_CTRL_PX = 110.0
+OFFRAMP_END_DX_PX = 340.0
+OFFRAMP_END_DY_PX = -300.0
 # Main road only: BEV sign placed this many **meters** of centerline arc **before** the first off-ramp
 # (travel toward decreasing ``y``). ``0`` disables.
 OFFRAMP_ADVANCE_SIGN_ARC_METERS_BEFORE = 50.0
