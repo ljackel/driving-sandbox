@@ -20,7 +20,8 @@ Summary:
 - **Training:** MSE on ``DrivingNet`` channel 0 only with ``take_offramp`` concatenated to the head input; ``EPOCHS`` is in switches; see ``MODEL_USE_TRANSFORMER_HEAD``, ``LEARNING_RATE``.
 - **Simulation:** ``MAX_SIM_SPEED`` (near the top) toggles live OpenCV windows and display delays (not MP4 I/O).
   Each ``simulate`` run always writes first-person + bird's-eye MP4s into ``runs/<timestamp>_sim/`` (filenames
-  ``SIM_FP_VIDEO_FILENAME``, ``SIM_BEV_VIDEO_FILENAME``). ``SIM_YAW_RATE_GAIN`` from ``_compute_sim_yaw_rate_gain`` aligns
+  ``SIM_FP_VIDEO_FILENAME``, ``SIM_BEV_VIDEO_FILENAME``) plus a final BEV still of the full trail
+  (``SIM_BEV_PATH_IMAGE_FILENAME``, same styling as the live BEV). ``SIM_YAW_RATE_GAIN`` from ``_compute_sim_yaw_rate_gain`` aligns
   ``psi += steering * gain * dt`` with curvature step semantics on the train/test ``y`` grid. Off-ramp **merges** (main → Bézier) require
   ``SIM_PROJECT_REF_ONTO_MAIN_ROAD`` and ``OFFRAMP_ENABLE``; at each branch, the sim merges only if
   ``take_offramp`` intent is on—either fixed ``SIM_TAKE_OFFRAMP`` for the whole run, or per-step upper-half
@@ -29,6 +30,7 @@ Summary:
 """
 from __future__ import annotations
 
+from itertools import filterfalse
 import json
 import sys
 import types
@@ -163,7 +165,7 @@ ROAD_EDGE_THICKNESS = 1
 # **Training** (``generate_dataset`` lateral / crops): only ``ROADKILL_OBSTACLE_Y_PX`` — use a ``float`` or ``tuple``.
 # **Map + simulation** also draw ``ROADKILL_EVAL_ONLY_OBSTACLE_Y_PX`` and apply that detour in ``simulate`` only
 # (model never supervised on those rows; tests generalization).
-ROADKILL_ENABLE = True
+ROADKILL_ENABLE = False
 ROADKILL_OBSTACLE_Y_PX = (850.0,)
 ROADKILL_EVAL_ONLY_OBSTACLE_Y_PX = (300.0,)
 # Half-height (px) of full-strength detour over the splat; keep modest so most motion stays on eased ramps.
@@ -203,6 +205,8 @@ BOT_CAR_REL_SPEED = 0.2
 BOT_CAR_PASS_INFLUENCE_ARC_M = 92.0
 BOT_CAR_CORE_ARC_M = 16.0
 BOT_CAR_EXIT_ARC_M = 36.0
+# BEV slow-bot footprint vs ego: ``1.0`` = same width as ``SIM_BEV_EGO_CAR_WIDTH_M`` (shared draw path).
+BOT_CAR_BEV_WIDTH_SCALE = 1.0
 # Off-ramp geometry (see ``OFFRAMP_ENABLE`` in switches): branch on main centerline; image-row fraction
 # (0 = top, 1 = bottom). Must be > 0.5 for bottom-half exit; ignored otherwise.
 OFFRAMP_BRANCH_Y_FRAC = 0.78
@@ -461,7 +465,7 @@ def offramp_camera_lateral_offset_px(px_per_m: float) -> float:
 
 
 # Live BEV / ``sim_path.png`` (written under ``runs/<timestamp>_sim/``): top-down ego footprint (meters, full scale on the map).
-SIM_BEV_EGO_CAR_WIDTH_M = 1.5
+SIM_BEV_EGO_CAR_WIDTH_M = 1.
 SIM_BEV_EGO_CAR_LENGTH_M = 3.0
 # If the true size in pixels is smaller than this length (px), scale the icon up uniformly
 # (keeps 1.5 m × 3 m proportions; set0 to always use exact map scale).
@@ -472,6 +476,8 @@ SIM_START_MAX_INSET_PX = 200
 SIM_FP_VIDEO_FILENAME = "sim_first_person.mp4"
 # Bird's-eye MP4 every run (``WORLD_IMAGE_SIZE`` square, trail + ego + optional nav box); same FPS as first-person.
 SIM_BEV_VIDEO_FILENAME = "sim_bev.mp4"
+# Final bird's-eye PNG after a run: full pink trail + ego at last pose (matches live BEV, not ``sim_path.png``).
+SIM_BEV_PATH_IMAGE_FILENAME = "sim_bev_path.png"
 # Cap polyline vertices for the BEV trail (subsamples long paths; speeds ``_bev_realtime_frame``).
 SIM_BEV_TRAIL_MAX_POINTS = 384
 # Playback speed matches one simulation step per frame (``1 / SIM_DT``).

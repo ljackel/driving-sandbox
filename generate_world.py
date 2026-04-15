@@ -331,9 +331,16 @@ def _bev_car_polygon_int32(
     return np.round(corners).astype(np.int32).reshape(-1, 1, 2)
 
 
-def _bot_car_display_extents_px(px_per_m: float) -> tuple[float, float]:
+def bev_topdown_car_extent_px(
+    px_per_m: float,
+    *,
+    width_scale: float = 1.0,
+) -> tuple[float, float]:
+    """Length × width (px) for BEV top-down car icons; same basis as ``SIM_BEV_EGO_CAR_*``."""
     len_px = float(cfg.SIM_BEV_EGO_CAR_LENGTH_M) * float(px_per_m)
-    wid_px = float(cfg.SIM_BEV_EGO_CAR_WIDTH_M) * float(px_per_m)
+    wid_px = (
+        float(cfg.SIM_BEV_EGO_CAR_WIDTH_M) * float(px_per_m) * float(width_scale)
+    )
     mn = float(cfg.SIM_BEV_EGO_CAR_MIN_DISPLAY_LEN_PX)
     if mn > 0.0 and len_px < mn:
         s = mn / max(len_px, 1e-6)
@@ -342,18 +349,23 @@ def _bot_car_display_extents_px(px_per_m: float) -> tuple[float, float]:
     return len_px, wid_px
 
 
-def draw_slow_bot_car_bev(
+def draw_bev_topdown_car(
     world_bgr: np.ndarray,
     cx: float,
     cy: float,
     psi: float,
     px_per_m: float,
+    *,
+    body_bgr: tuple[int, int, int],
+    outline_bgr: tuple[int, int, int],
+    axis_bgr: tuple[int, int, int],
+    width_scale: float = 1.0,
 ) -> None:
-    """In-place top-down bot vehicle (distinct color) for perspective / BEV compositing."""
-    len_px, wid_px = _bot_car_display_extents_px(px_per_m)
+    """In-place BEV vehicle: fill, 1px outline, hood line (shared by ego and slow-bot)."""
+    len_px, wid_px = bev_topdown_car_extent_px(px_per_m, width_scale=width_scale)
     poly = _bev_car_polygon_int32(cx, cy, psi, len_px, wid_px)
-    cv2.fillConvexPoly(world_bgr, poly, (55, 75, 220))
-    cv2.polylines(world_bgr, [poly], True, (230, 230, 255), 1, cv2.LINE_AA)
+    cv2.fillConvexPoly(world_bgr, poly, body_bgr)
+    cv2.polylines(world_bgr, [poly], True, outline_bgr, 1, cv2.LINE_AA)
     fx = float(np.cos(psi))
     fy = float(np.sin(psi))
     hx0 = cx - 0.22 * len_px * fx
@@ -364,9 +376,30 @@ def draw_slow_bot_car_bev(
         world_bgr,
         (int(round(hx0)), int(round(hy0))),
         (int(round(hx1)), int(round(hy1))),
-        (180, 200, 255),
+        axis_bgr,
         1,
         cv2.LINE_AA,
+    )
+
+
+def draw_slow_bot_car_bev(
+    world_bgr: np.ndarray,
+    cx: float,
+    cy: float,
+    psi: float,
+    px_per_m: float,
+) -> None:
+    """In-place top-down bot vehicle (distinct color); same width/length as ego BEV icon."""
+    draw_bev_topdown_car(
+        world_bgr,
+        cx,
+        cy,
+        psi,
+        px_per_m,
+        body_bgr=(55, 75, 220),
+        outline_bgr=(255, 255, 255),
+        axis_bgr=(180, 200, 255),
+        width_scale=float(cfg.BOT_CAR_BEV_WIDTH_SCALE),
     )
 
 
@@ -403,6 +436,11 @@ def slow_bot_car_pass_blend_and_pose(
     """
     Arc-length slow-bot kinematics vs ego, left-lane pass blend, and right-lane BEV pose for drawing.
 
+    When ``y_ego`` is still below ``y_ref_bottom`` (image rows between ``y_ref_bottom`` and the map
+    bottom), arc length to ``y_ref_bottom`` *decreases* as the ego drives forward; the implementation
+    uses arc to ``y_ref_bottom + DATASET_MAP_MARGIN - 1`` there so ``sigma_b`` still increases with
+    forward motion.
+
     Returns:
         ``(w_pass, qx, qy, psi)`` with ``None`` pose when the bot is off-map or feature disabled.
     """
@@ -423,8 +461,28 @@ def slow_bot_car_pass_blend_and_pose(
         )
     )
     sigma_start = frac * float(s_full) + head_px
-    sigma_e = centerline_arc_length_between_rows(dw.cs, float(y_ego), float(y_ref_bottom))
-    sigma_b = sigma_start + rel * sigma_e
+    # Arc(``y_ego``, ``y_ref_bottom``) *shrinks* while the ego starts below the dataset bottom
+    # (``find_start_pose_bottom`` uses rows near ``h - 1``, often *below* ``h - DATASET_MAP_MARGIN``)
+    # and drives up until it crosses ``y_ref_bottom`` — so ``sigma_b = sigma_start + rel * sigma_e``
+    # made the bot slide **down** the map then reverse. Below ``y_ref``, couple to arc to the image
+    # bottom (``y_ref_bottom + DATASET_MAP_MARGIN - 1``) so forward motion always increases ``sigma_b``;
+    # at ``y_ref`` both pieces match. Past ``y_ref``, keep the original arc-to-ref odometer.
+    y_odom_bottom = float(y_ref_bottom) + float(cfg.DATASET_MAP_MARGIN) - 1.0
+    d_odom = centerline_arc_length_between_rows(
+        dw.cs, float(y_ref_bottom), y_odom_bottom
+    )
+    sigma_e_ref = centerline_arc_length_between_rows(
+        dw.cs, float(y_ego), float(y_ref_bottom)
+    )
+    if float(y_ego) > float(y_ref_bottom):
+        sigma_e_odom = centerline_arc_length_between_rows(
+            dw.cs, float(y_ego), y_odom_bottom
+        )
+        sigma_b = float(sigma_start) + rel * (
+            float(sigma_e_odom) - float(d_odom)
+        )
+    else:
+        sigma_b = float(sigma_start) + rel * float(sigma_e_ref)
     y_bot_row = centerline_y_at_arc_from_bottom(
         dw.cs, float(y_ref_bottom), sigma_b, y_top
     )
@@ -437,7 +495,7 @@ def slow_bot_car_pass_blend_and_pose(
     x_c = float(dw.get_road_center(y_bot_row))
     dxdY = float(dw.cs(y_bot_row, nu=1))
     psi = _psi_road_from_dxdY(dxdY)
-    gap = float(sigma_b - sigma_e)
+    gap = float(sigma_b - sigma_e_ref)
     w = _slow_bot_pass_blend_weight(gap, px_per_m)
     qx, qy = _right_lane_bev_xy(x_c, y_bot_row, psi, float(right_lane_offset_px))
     return (w, float(qx), float(qy), float(psi))
