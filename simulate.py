@@ -20,6 +20,8 @@ BEV segment; capped by ``DATASET_OFFRAMP_*`` when ``DATASET_OFFRAMP_MATCH_MAIN_S
 With ``SIM_FP_VIDEO_ENABLE``,
 each driver crop is written to ``sim_first_person.mp4`` (same preprocessing as the model when
 ``PERSPECTIVE_INPUT_BOTTOM_HALF_ONLY`` is true: bottom half of the warp, resized to ``CAMERA_IMAGE_SIZE``).
+With ``SIM_BEV_VIDEO_ENABLE``, each step appends a bird's-eye frame (map size, trail and ego, no pause/slider HUD)
+to ``sim_bev.mp4``.
 With ``SIM_REALTIME_BEV`` / ``SIM_REALTIME_DRIVER_VIEW``, live OpenCV windows show the map trail and/or
 the ego camera (same crop as the model). When ``SIM_TAKE_OFFRAMP_UPPER_HALF_NAV`` is true and ego is in the
 upper BEV half, the BEV draws a small **navigation instruction** box (``SIM_NAV_EXIT_INSTRUCTION_TEXT``) in the
@@ -31,7 +33,7 @@ Windows are tiled
 left-to-right (BEV then driver) using ``SIM_REALTIME_WINDOW_*`` so they do not overlap.
 The BEV view draws a **speed bar** at the bottom (drag with the mouse; see ``SIM_REALTIME_SPEED_*`` in config)
 that scales distance per simulation step. Use ``SIM_REALTIME_STEP_PAUSE_MS`` (and ``SIM_REALTIME_BEV_WAIT_MS``)
-to slow the live display (set pause to ``0`` and turn off BEV/driver windows or ``SIM_FP_VIDEO_ENABLE`` for headless speed).
+to slow the live display (set pause to ``0`` and turn off BEV/driver windows or ``SIM_*_VIDEO_ENABLE`` for headless speed).
 With CUDA, ``SIM_CUDNN_BENCHMARK`` and optional ``SIM_TORCH_COMPILE`` reduce per-step inference cost.
 
 **Input crop:** ``PERSPECTIVE_INPUT_BOTTOM_HALF_ONLY`` matches ``train.py`` / ``evaluate_test.py`` (bottom
@@ -589,11 +591,13 @@ def _bev_realtime_frame(
     extra_hint: str | None = None,
     nav_exit_active: bool = False,
     nav_exit_text: str = "take the next exit",
+    show_step_hud: bool = True,
 ) -> np.ndarray:
     """Bird's-eye frame: trail and ego in the **right lane** (not centerline).
 
     ``nav_exit_active`` / ``nav_exit_text`` control the optional upper-left instruction box (see
     ``SIM_TAKE_OFFRAMP_UPPER_HALF_NAV`` and ``SIM_NAV_EXIT_INSTRUCTION_TEXT`` in config).
+    When ``show_step_hud`` is false (e.g. ``SIM_BEV_VIDEO_ENABLE`` recording), step / pause hints are omitted.
     """
     vis = world_bgr.copy()
     if len(path) >= 2:
@@ -620,30 +624,31 @@ def _bev_realtime_frame(
     below_nav = 0
     if nav_exit_active and nav_exit_text:
         below_nav = _bev_draw_nav_instruction_box(vis, nav_exit_text)
-    line1_y = 26 if below_nav == 0 else below_nav + 18
-    line1 = f"step {len(path) - 1}   Space pause   q quit   Ctrl+C (terminal)"
-    cv2.putText(
-        vis,
-        line1,
-        (10, line1_y),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.65,
-        (255, 255, 255),
-        2,
-        cv2.LINE_AA,
-    )
-    if extra_hint:
-        hint_y = line1_y + 26
+    if show_step_hud:
+        line1_y = 26 if below_nav == 0 else below_nav + 18
+        line1 = f"step {len(path) - 1}   Space pause   q quit   Ctrl+C (terminal)"
         cv2.putText(
             vis,
-            extra_hint,
-            (10, hint_y),
+            line1,
+            (10, line1_y),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.55,
-            (180, 255, 220),
+            0.65,
+            (255, 255, 255),
             2,
             cv2.LINE_AA,
         )
+        if extra_hint:
+            hint_y = line1_y + 26
+            cv2.putText(
+                vis,
+                extra_hint,
+                (10, hint_y),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.55,
+                (180, 255, 220),
+                2,
+                cv2.LINE_AA,
+            )
     return vis
 
 
@@ -1194,6 +1199,7 @@ def run_simulation() -> tuple[
     str,
     float,
     str | None,
+    str | None,
 ]:
     """
     Load the newest checkpoint and roll out: crop -> ``DrivingNet`` channel 0 -> ``psi`` via
@@ -1205,6 +1211,8 @@ def run_simulation() -> tuple[
 
     When ``SIM_FP_VIDEO_ENABLE`` is true, writes each driver crop (plus a final pose frame when
     available) to ``<simulation_output_dir>/<SIM_FP_VIDEO_FILENAME>`` at ``SIM_VIDEO_FPS``.
+    When ``SIM_BEV_VIDEO_ENABLE`` is true, writes one bird's-eye frame per step to
+    ``<simulation_output_dir>/<SIM_BEV_VIDEO_FILENAME>`` (same FPS).
 
     **Off-ramps:** With projection and ``OFFRAMP_ENABLE``, the pose advances on the main spline until a
     branch row is crossed; it **merges** onto the corresponding Bézier only when ``take_offramp`` intent is
@@ -1213,7 +1221,8 @@ def run_simulation() -> tuple[
     Returns:
         ``world_bgr``, list of ``SimPathPoint`` (centerline ``x,y``, integrated ``psi``, ramp flag,
         ``u_ramp``), checkpoint path,
-        ``px_per_m``, and absolute path to the first-person MP4 if recorded, else ``None``.
+        ``px_per_m``, absolute path to the first-person MP4 if recorded (else ``None``),
+        and absolute path to the BEV MP4 if recorded (else ``None``).
     """
     ckpt = latest_checkpoint_path()
     if ckpt is None:
@@ -1258,9 +1267,14 @@ def run_simulation() -> tuple[
     out_dir = simulation_output_dir(ckpt)
     fp_video_abs: str | None = None
     video_writer: cv2.VideoWriter | None = None
-    if cfg.SIM_FP_VIDEO_ENABLE:
+    bev_video_abs: str | None = None
+    bev_video_writer: cv2.VideoWriter | None = None
+    if cfg.SIM_FP_VIDEO_ENABLE or cfg.SIM_BEV_VIDEO_ENABLE:
         os.makedirs(out_dir, exist_ok=True)
+    if cfg.SIM_FP_VIDEO_ENABLE:
         fp_video_abs = os.path.join(out_dir, cfg.SIM_FP_VIDEO_FILENAME)
+    if cfg.SIM_BEV_VIDEO_ENABLE:
+        bev_video_abs = os.path.join(out_dir, cfg.SIM_BEV_VIDEO_FILENAME)
 
     path: list[SimPathPoint] = [_sim_path_point(x0, y0, psi)]
     x, y = x0, y0
@@ -1497,6 +1511,38 @@ def run_simulation() -> tuple[
             )
             rt_ui["ego_hit_xy"] = (int(round(qx_hit)), int(round(qy_hit)))
             rt_ui["ego_grab_radius_px"] = _bev_ego_grab_radius_px(float(dw.px_per_m))
+
+            if bev_video_abs is not None:
+                bev_fr = _bev_realtime_frame(
+                    world,
+                    dw,
+                    path,
+                    x,
+                    y,
+                    psi_draw,
+                    lat_hit,
+                    nav_exit_active=_bev_nav_exit_active(float(y), h),
+                    nav_exit_text=str(cfg.SIM_NAV_EXIT_INSTRUCTION_TEXT),
+                    show_step_hud=False,
+                )
+                bvh, bvw = bev_fr.shape[:2]
+                if bev_video_writer is None:
+                    bev_video_writer = cv2.VideoWriter(
+                        bev_video_abs,
+                        cv2.VideoWriter_fourcc(*"mp4v"),
+                        float(cfg.SIM_VIDEO_FPS),
+                        (bvw, bvh),
+                    )
+                    if not bev_video_writer.isOpened():
+                        print(
+                            f"Warning: could not open BEV video writer for {bev_video_abs!r}; "
+                            "skipping bird's-eye MP4.",
+                            file=sys.stderr,
+                        )
+                        bev_video_abs = None
+                        bev_video_writer = None
+                if bev_video_writer is not None:
+                    bev_video_writer.write(bev_fr)
 
             live_bev = cfg.SIM_REALTIME_BEV and not rt_gui_disabled
             live_drv = cfg.SIM_REALTIME_DRIVER_VIEW and not rt_gui_disabled
@@ -1809,17 +1855,23 @@ def run_simulation() -> tuple[
         # Enabled but no frames (e.g. immediate warp failure).
         fp_video_abs = None
 
+    if bev_video_writer is not None:
+        bev_video_writer.release()
+        bev_video_abs = os.path.abspath(bev_video_abs) if bev_video_abs else None
+    elif cfg.SIM_BEV_VIDEO_ENABLE and bev_video_abs is not None:
+        bev_video_abs = None
+
     n_steps = len(path) - 1
     print(f"Simulation steps taken: {n_steps}")
 
-    return world, path, ckpt, px_per_m, fp_video_abs
+    return world, path, ckpt, px_per_m, fp_video_abs, bev_video_abs
 
 
 def main() -> None:
-    """Run simulation, save BEV overlay, CSV, first-person MP4 (if enabled), print stats, show figure."""
+    """Run simulation, save BEV overlay, CSV, optional first-person and BEV MP4s, print stats, show figure."""
     n_train, n_test = count_train_test_examples()
     print(f"Dataset: {n_train} train examples, {n_test} test examples")
-    world_bgr, path, ckpt, px_per_m, fp_video = run_simulation()
+    world_bgr, path, ckpt, px_per_m, fp_video, bev_video = run_simulation()
     path_arr = np.array([[p[0], p[1], p[2]] for p in path], dtype=np.float64)
 
     vis = world_bgr.copy()
@@ -1977,6 +2029,8 @@ def main() -> None:
     print(f"Saved trajectory: {out_csv!r}")
     if fp_video:
         print(f"Saved first-person video: {fp_video!r} ({cfg.SIM_VIDEO_FPS} FPS)")
+    if bev_video:
+        print(f"Saved bird's-eye video: {bev_video!r} ({cfg.SIM_VIDEO_FPS} FPS)")
 
     plt.figure(figsize=(10, 10))
     plt.imshow(cv2.cvtColor(vis, cv2.COLOR_BGR2RGB))

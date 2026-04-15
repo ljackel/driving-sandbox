@@ -19,7 +19,7 @@ Summary:
   to perturbed rows when ``DATASET_PERTURBATIONS_ENABLE`` is true and ``PERTURB_*`` σ > 0.
 - **Training:** MSE on ``DrivingNet`` channel 0 only with ``take_offramp`` concatenated to the head input; ``EPOCHS`` is in switches; see ``MODEL_USE_TRANSFORMER_HEAD``, ``LEARNING_RATE``.
 - **Simulation:** ``SIM_YAW_RATE_GAIN`` from ``_compute_sim_yaw_rate_gain`` aligns ``psi += steering * gain * dt``
-  with curvature step semantics on the train/test ``y`` grid. Optional first-person MP4: ``SIM_FP_VIDEO_*``.
+  with curvature step semantics on the train/test ``y`` grid. Optional MP4s: ``SIM_FP_VIDEO_*``, ``SIM_BEV_VIDEO_*``.
   Off-ramp **merges** (main → Bézier) require ``SIM_PROJECT_REF_ONTO_MAIN_ROAD`` and ``OFFRAMP_ENABLE``; at each
   branch, the sim merges only if ``take_offramp`` intent is on—either fixed ``SIM_TAKE_OFFRAMP`` for the whole
   run, or per-step upper-half geographic intent when ``SIM_TAKE_OFFRAMP_UPPER_HALF_NAV`` is true (with optional
@@ -418,6 +418,9 @@ SIM_BEV_EGO_CAR_MIN_DISPLAY_LEN_PX = 22.0
 SIM_START_MAX_INSET_PX = 200
 # First-person video from ``simulate.run_simulation`` (same resolution as ``CAMERA_IMAGE_SIZE``); gated by ``SIM_FP_VIDEO_ENABLE`` (switches above).
 SIM_FP_VIDEO_FILENAME = "sim_first_person.mp4"
+# Bird's-eye video: full map resolution (``WORLD_IMAGE_SIZE`` square), trail + ego icon + optional nav box; same FPS as first-person.
+SIM_BEV_VIDEO_ENABLE = True
+SIM_BEV_VIDEO_FILENAME = "sim_bev.mp4"
 # Playback speed matches one simulation step per frame (``1 / SIM_DT``).
 SIM_VIDEO_FPS = 1.0 / SIM_DT
 # Live bird's-eye map during ``simulate.run_simulation`` (``cv2.imshow``). Press ``q`` in a window to stop early.
