@@ -30,11 +30,8 @@ Summary:
 from __future__ import annotations
 
 import json
-from nt import truncate
 import sys
 import types
-
-from pandas.core.algorithms import T
 
 # --- Paths (relative to project root) ---
 DATA_DIR = "data"
@@ -195,10 +192,12 @@ ROADKILL_ACROSS_MAX_FRAC_OF_LANE = 0.38
 # Max multiple of lane width for along-road semi-axis (elongated but not huge).
 ROADKILL_ALONG_MAX_LANE_WIDTHS = 2.2
 # Slow **bot car** on the main road (same right-lane lateral as dataset camera): arc-length odometer from
-# map bottom; bot lies ``BOT_CAR_HEAD_START_M`` ahead of ego at σ=0 and moves at ``BOT_CAR_REL_SPEED`` × ego
-# arc speed so ego catches up. Passing uses left-lane blend (same sign as roadkill) + bot drawn on BEV before warp.
+# ``y = WORLD_IMAGE_SIZE - DATASET_MAP_MARGIN`` (drivable bottom). At ego σ=0, bot arc ahead is
+# ``BOT_CAR_START_FRAC_FROM_BOTTOM`` × full centerline arc to ``DATASET_MAP_MARGIN`` (keeps bot clear of
+# low-``y`` roadkill), plus optional ``BOT_CAR_HEAD_START_M``. Then ``BOT_CAR_REL_SPEED`` × ego arc so ego catches up.
 BOT_CAR_ENABLE = True
-BOT_CAR_HEAD_START_M = 42.0
+BOT_CAR_START_FRAC_FROM_BOTTOM = 1.0 / 3.0
+BOT_CAR_HEAD_START_M = 0.0
 BOT_CAR_REL_SPEED = 0.5
 # Arc-length windows (meters → px in code) for raised-cosine pass / merge-back weights vs ``σ_bot − σ_ego``.
 BOT_CAR_PASS_INFLUENCE_ARC_M = 92.0

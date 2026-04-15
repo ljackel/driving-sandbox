@@ -379,7 +379,7 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES, num_test=cfg.NUM_TEST_FRAMES):
     ``simulate`` uses the full set (training + eval-only) for open-loop generalization tests.
 
     **Slow bot:** when ``BOT_CAR_ENABLE``, main-road frames composite a slower vehicle in the right lane
-    ahead (``BOT_CAR_HEAD_START_M``, ``BOT_CAR_REL_SPEED`` vs ego arc from map bottom); lateral labels use
+    ahead (``BOT_CAR_START_FRAC_FROM_BOTTOM``, ``BOT_CAR_REL_SPEED`` vs ego arc from map bottom); lateral labels use
     ``max(roadkill, pass)`` like an extra left-lane curriculum (κ still from centerline at ``y``).
 
     **Off-ramp:** when ``OFFRAMP_ENABLE`` and ``DATASET_OFFRAMP_LABELS_ENABLE``, also writes

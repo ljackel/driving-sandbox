@@ -411,9 +411,20 @@ def slow_bot_car_pass_blend_and_pose(
     px_per_m = float(dw.px_per_m)
     head_px = float(cfg.BOT_CAR_HEAD_START_M) * px_per_m
     rel = float(cfg.BOT_CAR_REL_SPEED)
-    sigma_e = centerline_arc_length_between_rows(dw.cs, float(y_ego), float(y_ref_bottom))
-    sigma_b = head_px + rel * sigma_e
     y_top = float(cfg.DATASET_MAP_MARGIN)
+    s_full = centerline_arc_length_between_rows(
+        dw.cs, y_top, float(y_ref_bottom)
+    )
+    frac = float(
+        np.clip(
+            float(getattr(cfg, "BOT_CAR_START_FRAC_FROM_BOTTOM", 1.0 / 3.0)),
+            0.0,
+            0.999,
+        )
+    )
+    sigma_start = frac * float(s_full) + head_px
+    sigma_e = centerline_arc_length_between_rows(dw.cs, float(y_ego), float(y_ref_bottom))
+    sigma_b = sigma_start + rel * sigma_e
     y_bot_row = centerline_y_at_arc_from_bottom(
         dw.cs, float(y_ref_bottom), sigma_b, y_top
     )

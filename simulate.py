@@ -692,9 +692,14 @@ def _bev_realtime_frame(
     ``SIM_TAKE_OFFRAMP_UPPER_HALF_NAV`` and ``SIM_NAV_EXIT_INSTRUCTION_TEXT`` in config).
     When ``show_step_hud`` is false (saved BEV MP4), step / pause hints are omitted.
     """
-    vis = _world_bgr_composite_slow_bot(
+    # Static road/grass is ``world_bgr`` (built once in ``DrivingWorld``). Per frame we only composite
+    # the moving bot (if any) and draw trail + ego on a writable buffer — no full map regeneration.
+    # ``_world_bgr_composite_slow_bot`` returns a fresh copy when it draws the bot; otherwise the same
+    # array reference, so copy only when we must not mutate the shared world.
+    bot_layer = _world_bgr_composite_slow_bot(
         world_bgr, dw, float(y), on_ramp=on_ramp, map_h=map_h
-    ).copy()
+    )
+    vis = world_bgr.copy() if bot_layer is world_bgr else bot_layer
     if len(path) >= 2:
         n = len(path)
         qs = np.empty((n, 2), dtype=np.float32)
