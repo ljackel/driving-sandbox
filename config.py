@@ -18,12 +18,14 @@ Summary:
   can match main-road spacing (``DATASET_OFFRAMP_MATCH_MAIN_SPACING``). Column ``take_offramp`` (0 = main road, 1 = ramp) is an extra model input. Lateral/yaw recentering applies
   to perturbed rows when ``DATASET_PERTURBATIONS_ENABLE`` is true and ``PERTURB_*`` σ > 0.
 - **Training:** MSE on ``DrivingNet`` channel 0 only with ``take_offramp`` concatenated to the head input; ``EPOCHS`` is in switches; see ``MODEL_USE_TRANSFORMER_HEAD``, ``LEARNING_RATE``.
-- **Simulation:** ``SIM_YAW_RATE_GAIN`` from ``_compute_sim_yaw_rate_gain`` aligns ``psi += steering * gain * dt``
-  with curvature step semantics on the train/test ``y`` grid. Optional MP4s: ``SIM_FP_VIDEO_*``, ``SIM_BEV_VIDEO_*``.
-  Off-ramp **merges** (main → Bézier) require ``SIM_PROJECT_REF_ONTO_MAIN_ROAD`` and ``OFFRAMP_ENABLE``; at each
-  branch, the sim merges only if ``take_offramp`` intent is on—either fixed ``SIM_TAKE_OFFRAMP`` for the whole
-  run, or per-step upper-half geographic intent when ``SIM_TAKE_OFFRAMP_UPPER_HALF_NAV`` is true (with optional
-  BEV nav text ``SIM_NAV_EXIT_INSTRUCTION_TEXT``).
+- **Simulation:** ``MAX_SIM_SPEED`` (near the top) toggles a bundle of ``SIM_*`` flags for fast headless roll-out
+  vs custom interactive/recording settings. ``SIM_YAW_RATE_GAIN`` from ``_compute_sim_yaw_rate_gain`` aligns
+  ``psi += steering * gain * dt`` with curvature step semantics on the train/test ``y`` grid. Optional MP4s:
+  ``SIM_FP_VIDEO_*``, ``SIM_BEV_VIDEO_*``. Off-ramp **merges** (main → Bézier) require
+  ``SIM_PROJECT_REF_ONTO_MAIN_ROAD`` and ``OFFRAMP_ENABLE``; at each branch, the sim merges only if
+  ``take_offramp`` intent is on—either fixed ``SIM_TAKE_OFFRAMP`` for the whole run, or per-step upper-half
+  geographic intent when ``SIM_TAKE_OFFRAMP_UPPER_HALF_NAV`` is true (with optional BEV nav text
+  ``SIM_NAV_EXIT_INSTRUCTION_TEXT``).
 """
 from __future__ import annotations
 
@@ -42,6 +44,40 @@ LABELS_CSV = "labels.csv"
 LABELS_CSV_ALT = "labels_new.csv"
 LABELS_TMP = "labels.partial.tmp"
 
+# --- Simulation wall-clock speed (``simulate.py``) ---
+# True: headless-oriented settings (no live OpenCV windows, no MP4 writers, zero ``waitKey`` delay).
+# False: use the ``_CUSTOM_SIM_*`` values in the next block for FP/BEV video, realtime windows, and delays.
+MAX_SIM_SPEED = True
+
+# Applied only when ``MAX_SIM_SPEED`` is False. Adjust these for your preferred interactive / recording run.
+_CUSTOM_SIM_FP_VIDEO_ENABLE = True
+_CUSTOM_SIM_BEV_VIDEO_ENABLE = False
+_CUSTOM_SIM_REALTIME_BEV = True
+_CUSTOM_SIM_REALTIME_DRIVER_VIEW = True
+_CUSTOM_SIM_REALTIME_BEV_WAIT_MS = 1
+_CUSTOM_SIM_REALTIME_STEP_PAUSE_MS = 0
+_CUSTOM_SIM_CUDNN_BENCHMARK = True
+_CUSTOM_SIM_TORCH_COMPILE = False
+
+if MAX_SIM_SPEED:
+    SIM_FP_VIDEO_ENABLE = False
+    SIM_BEV_VIDEO_ENABLE = False
+    SIM_REALTIME_BEV = False
+    SIM_REALTIME_DRIVER_VIEW = False
+    SIM_REALTIME_BEV_WAIT_MS = 0
+    SIM_REALTIME_STEP_PAUSE_MS = 0
+    SIM_CUDNN_BENCHMARK = True
+    SIM_TORCH_COMPILE = False
+else:
+    SIM_FP_VIDEO_ENABLE = _CUSTOM_SIM_FP_VIDEO_ENABLE
+    SIM_BEV_VIDEO_ENABLE = _CUSTOM_SIM_BEV_VIDEO_ENABLE
+    SIM_REALTIME_BEV = _CUSTOM_SIM_REALTIME_BEV
+    SIM_REALTIME_DRIVER_VIEW = _CUSTOM_SIM_REALTIME_DRIVER_VIEW
+    SIM_REALTIME_BEV_WAIT_MS = _CUSTOM_SIM_REALTIME_BEV_WAIT_MS
+    SIM_REALTIME_STEP_PAUSE_MS = _CUSTOM_SIM_REALTIME_STEP_PAUSE_MS
+    SIM_CUDNN_BENCHMARK = _CUSTOM_SIM_CUDNN_BENCHMARK
+    SIM_TORCH_COMPILE = _CUSTOM_SIM_TORCH_COMPILE
+
 # --- Switches (feature toggles; adjust these first) ---
 # Perspective: use only bottom half of warp before resize (train / eval / sim).
 PERSPECTIVE_INPUT_BOTTOM_HALF_ONLY = False
@@ -57,10 +93,7 @@ DATASET_PERTURBATIONS_ENABLE = True
 MODEL_USE_TRANSFORMER_HEAD = True
 # Training: number of epochs per ``train.py`` run.
 EPOCHS = 20
-# Simulation: write first-person MP4 during roll-out.
-SIM_FP_VIDEO_ENABLE = True
-# Simulation: write bird's-eye MP4 (map resolution, trail + ego); see ``SIM_BEV_VIDEO_*`` below.
-SIM_BEV_VIDEO_ENABLE = False
+# Simulation video / realtime windows: set by ``MAX_SIM_SPEED`` / ``_CUSTOM_SIM_*`` at top of this file.
 # World: draw a secondary off-ramp in the bottom half of the BEV; optional dataset labels + κ for it.
 OFFRAMP_ENABLE = True
 # Off-ramps: one **lane** wide on the map (half the main road´s paved width) and no centerline dashes.
@@ -391,10 +424,7 @@ SIM_DT = 0.05
 SIM_YAW_RATE_GAIN = _compute_sim_yaw_rate_gain()
 # Maximum simulation steps per ``simulate.run_simulation`` (hard cap; early exit may stop sooner).
 SIM_MAX_STEPS = 2000
-# If CUDA: enable cuDNN autotuner (helps fixed ``CAMERA_IMAGE_SIZE`` inference after a short warmup).
-SIM_CUDNN_BENCHMARK = True
-# If true and PyTorch supports ``torch.compile``, compile ``DrivingNet`` for faster step inference (first steps slower).
-SIM_TORCH_COMPILE = False
+# ``SIM_CUDNN_BENCHMARK`` / ``SIM_TORCH_COMPILE``: set by ``MAX_SIM_SPEED`` / ``_CUSTOM_SIM_*`` at top.
 # End roll-out when the centerline reference reaches the top drivable band (``y <= DATASET_MAP_MARGIN``).
 SIM_STOP_WHEN_REACHES_MAP_TOP = True
 # Meters from centerline toward driver's right; must match ``generate_dataset`` camera offset
@@ -424,22 +454,16 @@ SIM_FP_VIDEO_FILENAME = "sim_first_person.mp4"
 SIM_BEV_VIDEO_FILENAME = "sim_bev.mp4"
 # Playback speed matches one simulation step per frame (``1 / SIM_DT``).
 SIM_VIDEO_FPS = 1.0 / SIM_DT
-# Live bird's-eye map during ``simulate.run_simulation`` (``cv2.imshow``). Press ``q`` in a window to stop early.
-# Set false for headless / no-display environments.
-SIM_REALTIME_BEV = True
+# ``SIM_REALTIME_BEV`` / ``SIM_REALTIME_DRIVER_VIEW``: set by ``MAX_SIM_SPEED`` / ``_CUSTOM_SIM_*`` at top.
 SIM_REALTIME_BEV_WINDOW = "BEV — ego on map"
 # Separate window: ego perspective crop (same preprocessing as the network: ``_fp_video_frame_bgr``).
-SIM_REALTIME_DRIVER_VIEW = True
 SIM_REALTIME_DRIVER_WINDOW = "Driver — ego camera"
 # Initial top-left corner (screen px) for the first live window; second is placed to the right with a gap.
 SIM_REALTIME_WINDOW_ORIGIN_X = 40
 SIM_REALTIME_WINDOW_ORIGIN_Y = 40
 SIM_REALTIME_WINDOW_GAP_PX = 32
-# ``cv2.waitKey`` delay (ms) per step after updating live windows; ``0`` = block until a key each step.
-SIM_REALTIME_BEV_WAIT_MS = 1
-# Extra pause (ms) per step **when a live OpenCV window is shown** (easier to follow; does not change physics).
-# Set to ``0`` for fastest live roll-out; physics still uses ``SIM_DT`` / ``SIM_SPEED_M_S``.
-SIM_REALTIME_STEP_PAUSE_MS = 0
+# ``SIM_REALTIME_BEV_WAIT_MS`` / ``SIM_REALTIME_STEP_PAUSE_MS``: set by ``MAX_SIM_SPEED`` / ``_CUSTOM_SIM_*`` at top.
+# (``waitKey``: ``0`` = block until a key each step. Step pause does not change physics, only display pacing.)
 # BEV on-map speed bar (drag): position / ``SIM_REALTIME_SPEED_TRACKBAR_CENTER`` scales arc-length step per
 # roll-out iteration (100 = nominal ``SIM_SPEED_M_S * SIM_DT`` in px). Names are legacy from cv2 trackbars.
 SIM_REALTIME_SPEED_TRACKBAR_MAX = 200
