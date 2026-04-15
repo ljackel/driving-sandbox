@@ -535,7 +535,7 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES, num_test=cfg.NUM_TEST_FRAMES):
                 py,
                 fx,
                 fy,
-                lateral_offset_px=right_lane_offset_px,
+                lateral_offset_px=cfg.offramp_camera_lateral_offset_px(dw.px_per_m),
                 yaw_offset_rad=0.0,
             )
             if view is None:
@@ -641,7 +641,7 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES, num_test=cfg.NUM_TEST_FRAMES):
                 py,
                 fx,
                 fy,
-                lateral_offset_px=right_lane_offset_px,
+                lateral_offset_px=cfg.offramp_camera_lateral_offset_px(dw.px_per_m),
                 yaw_offset_rad=0.0,
             )
             if view is None:

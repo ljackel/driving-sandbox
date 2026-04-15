@@ -335,8 +335,8 @@ def _bezier_quadratic_xy_batch(
 
 class DrivingWorld:
     """
-    Top-down raster map: cubic-spline centerline from ``SPLINE_X_DELTAS_BOTTOM_TO_TOP``, two-lane road,
-    dashed center marking, optional off-ramps (``OFFRAMP_*``; primary branch + ``OFFRAMP_EXTRA_BRANCH_Y_PX``),
+    Top-down raster map: cubic-spline centerline from ``SPLINE_X_DELTAS_BOTTOM_TO_TOP``, two-lane main road,
+    dashed center marking, optional off-ramps (``OFFRAMP_*``; single-lane pavement when ``OFFRAMP_SINGLE_LANE``),
     optional right-lane roadkill
     obstacle(s) (``ROADKILL_*``; map shows training + eval-only rows). Curvature of the **main** spline drives
     dataset steering labels after global scaling; dataset lateral uses only ``ROADKILL_OBSTACLE_Y_PX``.
@@ -651,8 +651,9 @@ class DrivingWorld:
         lane_px: int,
         dash_len: int,
         dash_gap: int,
+        draw_center_dashes: bool = True,
     ) -> None:
-        """Draw gray pavement and white dashes along one open polyline."""
+        """Draw gray pavement and optional white center dashes along one open polyline."""
         if len(points) < 2:
             return
         cv2.polylines(
@@ -662,6 +663,8 @@ class DrivingWorld:
             cfg.WORLD_ROAD_BGR,
             thickness=lane_px * 2,
         )
+        if not draw_center_dashes:
+            return
         for i in range(0, len(points) - dash_len, dash_len + dash_gap):
             pt1 = tuple(points[i])
             pt2 = tuple(points[i + dash_len])
@@ -694,9 +697,24 @@ class DrivingWorld:
                 continue
             off = self._offramp_bezier_polyline_int(ctrl)
             if len(off) >= 2:
-                self._draw_road_polyline(
-                    world, off, lane_px=lane_px, dash_len=dash_len, dash_gap=dash_gap
-                )
+                if getattr(cfg, "OFFRAMP_SINGLE_LANE", False):
+                    lane_px_off = max(1, int(lane_px) // 2)
+                    self._draw_road_polyline(
+                        world,
+                        off,
+                        lane_px=lane_px_off,
+                        dash_len=dash_len,
+                        dash_gap=dash_gap,
+                        draw_center_dashes=False,
+                    )
+                else:
+                    self._draw_road_polyline(
+                        world,
+                        off,
+                        lane_px=lane_px,
+                        dash_len=dash_len,
+                        dash_gap=dash_gap,
+                    )
         self._draw_roadkill_obstacles(world)
         # Orientation: top of image is y=0 (small y); blue stripe marks that edge for debugging.
         cv2.line(

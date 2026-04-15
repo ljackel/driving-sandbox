@@ -306,7 +306,10 @@ def _ego_lateral_offset_px_at_y(
     on_ramp: bool = False,
 ) -> float:
     """Camera/ego offset from centerline (px); roadkill detour applies only on the main road."""
-    base = float(cfg.SIM_EGO_LATERAL_OFFSET_M) * float(dw.px_per_m)
+    if on_ramp:
+        base = float(cfg.offramp_camera_lateral_offset_px(dw.px_per_m))
+    else:
+        base = float(cfg.SIM_EGO_LATERAL_OFFSET_M) * float(dw.px_per_m)
     return lateral_offset_px_avoid_roadkill(
         float(y),
         base,
@@ -1764,7 +1767,7 @@ def main() -> None:
             vis,
             dw_overlay,
             int(n_offramp_train_vis),
-            float(cfg.SIM_EGO_LATERAL_OFFSET_M) * px_per_m,
+            float(cfg.offramp_camera_lateral_offset_px(px_per_m)),
             num_main_train=int(cfg.NUM_TRAIN_FRAMES),
         )
     poly_xy: list[list[float]] = []

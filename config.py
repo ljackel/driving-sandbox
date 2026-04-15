@@ -56,6 +56,10 @@ EPOCHS = 20
 SIM_FP_VIDEO_ENABLE = True
 # World: draw a secondary off-ramp in the bottom half of the BEV; optional dataset labels + κ for it.
 OFFRAMP_ENABLE = True
+# Off-ramps: one **lane** wide on the map (half the main road´s paved width) and no centerline dashes.
+# ``OFFRAMP_SINGLE_LANE_LATERAL_SCALE`` scales ego/camera offset from the ramp centerline vs ``SIM_EGO_LATERAL_OFFSET_M``.
+OFFRAMP_SINGLE_LANE = True
+OFFRAMP_SINGLE_LANE_LATERAL_SCALE = 0.5
 # Simulation: DrivingNet ``take_offramp`` input (1 = ramp intent; 0 = stay on main).
 # Off-ramp **geometry** in sim also needs ``SIM_PROJECT_REF_ONTO_MAIN_ROAD`` (see below).
 SIM_TAKE_OFFRAMP = False
@@ -367,6 +371,16 @@ SIM_STOP_WHEN_REACHES_MAP_TOP = True
 # Meters from centerline toward driver's right; must match ``generate_dataset`` camera offset
 # (``LANE_WIDTH_METERS * DATASET_RIGHT_LANE_LATERAL_FRAC``). Pixels = this × ``px_per_m`` in sim.
 SIM_EGO_LATERAL_OFFSET_M = LANE_WIDTH_METERS * DATASET_RIGHT_LANE_LATERAL_FRAC
+
+
+def offramp_camera_lateral_offset_px(px_per_m: float) -> float:
+    """Camera/ego lateral offset (px) from off-ramp centerline (dataset + sim)."""
+    o = float(SIM_EGO_LATERAL_OFFSET_M) * float(px_per_m)
+    if OFFRAMP_SINGLE_LANE:
+        return float(o * OFFRAMP_SINGLE_LANE_LATERAL_SCALE)
+    return o
+
+
 # Live BEV / ``sim_path.png``: top-down ego footprint (meters, full scale on the map).
 SIM_BEV_EGO_CAR_WIDTH_M = 1.5
 SIM_BEV_EGO_CAR_LENGTH_M = 3.0
