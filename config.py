@@ -18,10 +18,10 @@ Summary:
   can match main-road spacing (``DATASET_OFFRAMP_MATCH_MAIN_SPACING``). Column ``take_offramp`` (0 = main road, 1 = ramp) is an extra model input. Lateral/yaw recentering applies
   to perturbed rows when ``DATASET_PERTURBATIONS_ENABLE`` is true and ``PERTURB_*`` σ > 0.
 - **Training:** MSE on ``DrivingNet`` channel 0 only with ``take_offramp`` concatenated to the head input; ``EPOCHS`` is in switches; see ``MODEL_USE_TRANSFORMER_HEAD``, ``LEARNING_RATE``.
-- **Simulation:** ``MAX_SIM_SPEED`` (near the top) toggles a bundle of ``SIM_*`` flags for fast headless roll-out
-  vs custom interactive/recording settings. ``SIM_YAW_RATE_GAIN`` from ``_compute_sim_yaw_rate_gain`` aligns
-  ``psi += steering * gain * dt`` with curvature step semantics on the train/test ``y`` grid. Optional MP4s:
-  ``SIM_FP_VIDEO_*``, ``SIM_BEV_VIDEO_*``. Off-ramp **merges** (main → Bézier) require
+- **Simulation:** ``MAX_SIM_SPEED`` (near the top) toggles live OpenCV windows and display delays (not MP4 I/O).
+  Each ``simulate`` run always writes first-person + bird's-eye MP4s into ``runs/<timestamp>_sim/`` (filenames
+  ``SIM_FP_VIDEO_FILENAME``, ``SIM_BEV_VIDEO_FILENAME``). ``SIM_YAW_RATE_GAIN`` from ``_compute_sim_yaw_rate_gain`` aligns
+  ``psi += steering * gain * dt`` with curvature step semantics on the train/test ``y`` grid. Off-ramp **merges** (main → Bézier) require
   ``SIM_PROJECT_REF_ONTO_MAIN_ROAD`` and ``OFFRAMP_ENABLE``; at each branch, the sim merges only if
   ``take_offramp`` intent is on—either fixed ``SIM_TAKE_OFFRAMP`` for the whole run, or per-step upper-half
   geographic intent when ``SIM_TAKE_OFFRAMP_UPPER_HALF_NAV`` is true (with optional BEV nav text
@@ -30,6 +30,7 @@ Summary:
 from __future__ import annotations
 
 import json
+import sys
 from pickle import TRUE
 import types
 
@@ -45,13 +46,11 @@ LABELS_CSV_ALT = "labels_new.csv"
 LABELS_TMP = "labels.partial.tmp"
 
 # --- Simulation wall-clock speed (``simulate.py``) ---
-# True: headless-oriented settings (no live OpenCV windows, no MP4 writers, zero ``waitKey`` delay).
-# False: use the ``_CUSTOM_SIM_*`` values in the next block for FP/BEV video, realtime windows, and delays.
+# True: no live OpenCV windows, zero ``waitKey`` delay (first-person + BEV MP4s are still written each run).
+# False: use the ``_CUSTOM_SIM_*`` values below for realtime windows and delays.
 MAX_SIM_SPEED = True
 
-# Applied only when ``MAX_SIM_SPEED`` is False. Adjust these for your preferred interactive / recording run.
-_CUSTOM_SIM_FP_VIDEO_ENABLE = True
-_CUSTOM_SIM_BEV_VIDEO_ENABLE = False
+# Applied only when ``MAX_SIM_SPEED`` is False.
 _CUSTOM_SIM_REALTIME_BEV = True
 _CUSTOM_SIM_REALTIME_DRIVER_VIEW = True
 _CUSTOM_SIM_REALTIME_BEV_WAIT_MS = 1
@@ -60,8 +59,6 @@ _CUSTOM_SIM_CUDNN_BENCHMARK = True
 _CUSTOM_SIM_TORCH_COMPILE = False
 
 if MAX_SIM_SPEED:
-    SIM_FP_VIDEO_ENABLE = False
-    SIM_BEV_VIDEO_ENABLE = False
     SIM_REALTIME_BEV = False
     SIM_REALTIME_DRIVER_VIEW = False
     SIM_REALTIME_BEV_WAIT_MS = 0
@@ -69,8 +66,6 @@ if MAX_SIM_SPEED:
     SIM_CUDNN_BENCHMARK = True
     SIM_TORCH_COMPILE = False
 else:
-    SIM_FP_VIDEO_ENABLE = _CUSTOM_SIM_FP_VIDEO_ENABLE
-    SIM_BEV_VIDEO_ENABLE = _CUSTOM_SIM_BEV_VIDEO_ENABLE
     SIM_REALTIME_BEV = _CUSTOM_SIM_REALTIME_BEV
     SIM_REALTIME_DRIVER_VIEW = _CUSTOM_SIM_REALTIME_DRIVER_VIEW
     SIM_REALTIME_BEV_WAIT_MS = _CUSTOM_SIM_REALTIME_BEV_WAIT_MS
@@ -93,7 +88,7 @@ DATASET_PERTURBATIONS_ENABLE = True
 MODEL_USE_TRANSFORMER_HEAD = True
 # Training: number of epochs per ``train.py`` run.
 EPOCHS = 20
-# Simulation video / realtime windows: set by ``MAX_SIM_SPEED`` / ``_CUSTOM_SIM_*`` at top of this file.
+# Realtime BEV/driver windows: set by ``MAX_SIM_SPEED`` / ``_CUSTOM_SIM_*`` at top (MP4s are always on per sim run).
 # World: draw a secondary off-ramp in the bottom half of the BEV; optional dataset labels + κ for it.
 OFFRAMP_ENABLE = True
 # Off-ramps: one **lane** wide on the map (half the main road´s paved width) and no centerline dashes.
@@ -385,12 +380,23 @@ def _compute_sim_yaw_rate_gain() -> float:
     ``ds/dt = SIM_SPEED_M_S * px_per_m`` gives
     ``SIM_YAW_RATE_GAIN = kappa_max * SIM_SPEED_M_S * px_per_m`` so that
     ``psi += steering * SIM_YAW_RATE_GAIN * SIM_DT``.
+
+    Curvature matches ``generate_dataset.signed_path_curvature`` (no import of ``generate_dataset``:
+    that module loads ``config`` at import time and would recurse while ``SIM_YAW_RATE_GAIN`` is
+    still being initialized).
     """
     import numpy as np
 
     from dataset_split import dataset_train_test_y
-    from generate_dataset import signed_path_curvature
     from generate_world import DrivingWorld
+
+    def _kappa_main_road(cs, y: float) -> float:
+        d1 = float(cs(y, nu=1))
+        d2 = float(cs(y, nu=2))
+        denom = (1.0 + d1 * d1) ** 1.5
+        if denom < CURVATURE_DENOM_EPS:
+            return 0.0
+        return d2 / denom
 
     dw = DrivingWorld()
     size = dw.size
@@ -407,7 +413,7 @@ def _compute_sim_yaw_rate_gain() -> float:
     )
     kmax = 0.0
     for yf in np.concatenate((train_y, test_y)):
-        k = abs(float(signed_path_curvature(dw.cs, float(yf))))
+        k = abs(float(_kappa_main_road(dw.cs, float(yf))))
         if k > kmax:
             kmax = k
     if OFFRAMP_ENABLE and DATASET_OFFRAMP_LABELS_ENABLE:
@@ -420,8 +426,8 @@ def _compute_sim_yaw_rate_gain() -> float:
 SIM_SPEED_M_S = 20.0
 SIM_DT = 0.05
 # Heading rate (rad/s) per unit network output; derived from κ_max and speed (see ``_compute_sim_yaw_rate_gain``).
-# Nudge upward slightly if behavioral cloning still under-steers in open loop.
-SIM_YAW_RATE_GAIN = _compute_sim_yaw_rate_gain()
+# Nudge upward slightly if behavioral cloning still under-steers in open loop. Computed **lazily** on first
+# read (``__getattr__``) so ``generate_world`` can ``import config`` while this module is still loading.
 # Maximum simulation steps per ``simulate.run_simulation`` (hard cap; early exit may stop sooner).
 SIM_MAX_STEPS = 2000
 # ``SIM_CUDNN_BENCHMARK`` / ``SIM_TORCH_COMPILE``: set by ``MAX_SIM_SPEED`` / ``_CUSTOM_SIM_*`` at top.
@@ -440,7 +446,7 @@ def offramp_camera_lateral_offset_px(px_per_m: float) -> float:
     return o
 
 
-# Live BEV / ``sim_path.png``: top-down ego footprint (meters, full scale on the map).
+# Live BEV / ``sim_path.png`` (written under ``runs/<timestamp>_sim/``): top-down ego footprint (meters, full scale on the map).
 SIM_BEV_EGO_CAR_WIDTH_M = 1.5
 SIM_BEV_EGO_CAR_LENGTH_M = 3.0
 # If the true size in pixels is smaller than this length (px), scale the icon up uniformly
@@ -448,9 +454,9 @@ SIM_BEV_EGO_CAR_LENGTH_M = 3.0
 SIM_BEV_EGO_CAR_MIN_DISPLAY_LEN_PX = 22.0
 # Start as low as possible: try y = h-1, then move up until perspective warp fits.
 SIM_START_MAX_INSET_PX = 200
-# First-person video from ``simulate.run_simulation`` (same resolution as ``CAMERA_IMAGE_SIZE``); gated by ``SIM_FP_VIDEO_ENABLE`` (switches above).
+# First-person MP4 written every ``simulate`` run under ``runs/<timestamp>_sim/`` (``CAMERA_IMAGE_SIZE``).
 SIM_FP_VIDEO_FILENAME = "sim_first_person.mp4"
-# Bird's-eye video: full map resolution (``WORLD_IMAGE_SIZE`` square), trail + ego icon + optional nav box; same FPS as first-person (gated by switch above).
+# Bird's-eye MP4 every run (``WORLD_IMAGE_SIZE`` square, trail + ego + optional nav box); same FPS as first-person.
 SIM_BEV_VIDEO_FILENAME = "sim_bev.mp4"
 # Playback speed matches one simulation step per frame (``1 / SIM_DT``).
 SIM_VIDEO_FPS = 1.0 / SIM_DT
@@ -478,8 +484,17 @@ DUMMY_STEERING_MIN = -1.0
 DUMMY_STEERING_MAX = 1.0
 
 
+def __getattr__(name: str) -> float:
+    if name == "SIM_YAW_RATE_GAIN":
+        v = float(_compute_sim_yaw_rate_gain())
+        globals()["SIM_YAW_RATE_GAIN"] = v
+        return v
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 def to_json_snapshot() -> dict:
     """Public constants from this module as JSON-serializable dict (for training run logs)."""
+    getattr(sys.modules[__name__], "SIM_YAW_RATE_GAIN")
     snap: dict = {}
     for name in sorted(globals()):
         if name.startswith("_"):

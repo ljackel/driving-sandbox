@@ -40,7 +40,7 @@ Training benefits from a CUDA GPU; CPU works but is slower.
    python evaluate_test.py
    ```
 
-5. **Simulate** open-loop on the BEV map (loads latest checkpoint, can save `sim_path.png`, `ego_path.csv`, optional first-person MP4 `sim_first_person.mp4`, optional BEV MP4 `sim_bev.mp4` via `SIM_BEV_VIDEO_ENABLE`):
+5. **Simulate** open-loop on the BEV map (loads latest checkpoint; writes artifacts under **`runs/<timestamp>_sim/`**, including **`driving_net.pt`** and **`config.py`** copies plus PNG/CSV/MP4s):
 
    ```bash
    python simulate.py
@@ -97,7 +97,7 @@ Most scripts import **`config.py`** as `cfg`; change hyperparameters there rathe
 
 | File | Purpose |
 |------|---------|
-| **`simulate.py`** | Loads **latest checkpoint**, steps the policy on the map (main spline by arc length; **off-ramp Bézier** after a branch merge when intent allows), optional **real-time BEV/driver** windows, optional **first-person** and/or **bird's-eye** MP4 (`SIM_FP_VIDEO_*`, `SIM_BEV_VIDEO_*`); saves trajectory CSV and path overlay. Run: `python simulate.py`. |
+| **`simulate.py`** | Loads **latest checkpoint**, steps the policy on the map (main spline by arc length; **off-ramp Bézier** after a branch merge when intent allows); optional **real-time BEV/driver** windows; each run saves **first-person + BEV** MP4s, trajectory CSV, and path overlay under **`runs/<timestamp>_sim/`**. Run: `python simulate.py`. |
 
 ### Utilities and scratch
 
@@ -132,7 +132,8 @@ Paused BEV **drag-to-relocate** can snap to main or ramp when off-ramps exist (`
 ## Checkpoints
 
 - **`simulate.py`** / **`evaluate_test.py`** prefer the **newest** `runs/*/driving_net.pt` unless `data/driving_net.pt` is newer by a small margin (see `CHECKPOINT_PREFER_DATA_IF_NEWER_BY_SEC` in `config.py`).
-- After training, your latest run is also summarized in **`runs/LATEST_RUN.txt`** (path + status).
+- Each **`simulate.py`** invocation creates a fresh folder **`runs/<YYYY-mm-dd_HH-MM-SS>_sim/`** with **`sim_path.png`**, **`ego_path.csv`**, **`sim_first_person.mp4`**, **`sim_bev.mp4`**, a copy of the **`driving_net.pt`** used for the roll-out, and a copy of **`config.py`** (for reproduction; separate from training run directories).
+- After training, your latest train run is summarized in **`runs/LATEST_RUN.txt`** (path + status).
 
 ---
 
@@ -143,6 +144,4 @@ If OpenCV GUI calls fail (e.g. over SSH), set in `config.py` before running:
 - `SIM_REALTIME_BEV = False`
 - `SIM_REALTIME_DRIVER_VIEW = False`
 
-You can still enable `SIM_FP_VIDEO_ENABLE` / `SIM_BEV_VIDEO_ENABLE` to record MP4s without windows.
-
-or run with a short one-off patch that sets those flags before importing `simulate`.
+MP4s are written every run regardless of windows; use **`MAX_SIM_SPEED = True`** or set the realtime flags above for a headless-style roll-out. You can also patch flags in a one-liner before importing `simulate`.

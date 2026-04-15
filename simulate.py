@@ -17,11 +17,11 @@ clean **main-road** training sample locations (same ``y`` grid as ``generate_dat
 dataset rows are enabled, **orange bars** mark ramp train samples (same as ``train/offramp_*.jpg``:
 uniform arc length along each ramp at the **main-road train mean spacing** ``δ``, on the in-train
 BEV segment; capped by ``DATASET_OFFRAMP_*`` when ``DATASET_OFFRAMP_MATCH_MAIN_SPACING``).
-With ``SIM_FP_VIDEO_ENABLE``,
-each driver crop is written to ``sim_first_person.mp4`` (same preprocessing as the model when
-``PERSPECTIVE_INPUT_BOTTOM_HALF_ONLY`` is true: bottom half of the warp, resized to ``CAMERA_IMAGE_SIZE``).
-With ``SIM_BEV_VIDEO_ENABLE``, each step appends a bird's-eye frame (map size, trail and ego, no pause/slider HUD)
-to ``sim_bev.mp4``.
+Each roll-out writes **first-person** and **bird's-eye** MP4s into ``runs/<timestamp>_sim/`` (see
+``SIM_FP_VIDEO_FILENAME`` / ``SIM_BEV_VIDEO_FILENAME``), and copies the **checkpoint** and **config.py**
+used for that run (same names as training: ``CHECKPOINT_FILENAME``, ``config.py``). Driver crop uses the same
+preprocessing as the model when ``PERSPECTIVE_INPUT_BOTTOM_HALF_ONLY`` is true; BEV frames use
+``show_step_hud=False`` (no pause/slider HUD).
 With ``SIM_REALTIME_BEV`` / ``SIM_REALTIME_DRIVER_VIEW``, live OpenCV windows show the map trail and/or
 the ego camera (same crop as the model). When ``SIM_TAKE_OFFRAMP_UPPER_HALF_NAV`` is true and ego is in the
 upper BEV half, the BEV draws a small **navigation instruction** box (``SIM_NAV_EXIT_INSTRUCTION_TEXT``) in the
@@ -33,7 +33,7 @@ Windows are tiled
 left-to-right (BEV then driver) using ``SIM_REALTIME_WINDOW_*`` so they do not overlap.
 The BEV view draws a **speed bar** at the bottom (drag with the mouse; see ``SIM_REALTIME_SPEED_*`` in config)
 that scales distance per simulation step. Use ``SIM_REALTIME_STEP_PAUSE_MS`` (and ``SIM_REALTIME_BEV_WAIT_MS``)
-to slow the live display (set pause to ``0`` and turn off BEV/driver windows or ``SIM_*_VIDEO_ENABLE`` for headless speed).
+to slow the live display (set pause to ``0`` and turn off BEV/driver windows; MP4 encoding still runs each sim).
 With CUDA, ``SIM_CUDNN_BENCHMARK`` and optional ``SIM_TORCH_COMPILE`` reduce per-step inference cost.
 
 **Input crop:** ``PERSPECTIVE_INPUT_BOTTOM_HALF_ONLY`` matches ``train.py`` / ``evaluate_test.py`` (bottom
@@ -53,9 +53,11 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import signal
 import sys
 import time
+from datetime import datetime
 
 import cv2
 import matplotlib.pyplot as plt
@@ -124,9 +126,10 @@ def training_epochs_from_checkpoint(ckpt: str) -> int | None:
 
 def simulation_output_dir(ckpt: str) -> str:
     """
-    Resolve where to write ``sim_path.png`` and ``ego_path.csv``.
+    Legacy helper: directory **next to** a checkpoint (train run or ``data/``).
 
-    If ``ckpt`` lives under ``runs/<stamp>/``, returns that directory; otherwise ``data/``.
+    ``run_simulation`` / ``main`` instead use :func:`simulation_run_output_dir` so each sim session
+    gets its own ``runs/<timestamp>_sim/`` folder.
     """
     root = _project_root()
     ckpt_abs = os.path.normpath(os.path.abspath(ckpt))
@@ -138,6 +141,43 @@ def simulation_output_dir(ckpt: str) -> str:
     except ValueError:
         pass
     return os.path.join(root, cfg.DATA_DIR)
+
+
+def simulation_run_output_dir() -> str:
+    """
+    Create and return ``runs/<YYYY-mm-dd_HH-MM-SS>_sim/`` for one ``simulate.py`` invocation.
+
+    Uses the same date format as ``train.py`` run folders, with a ``_sim`` suffix so simulation
+    artifacts stay separate from training checkpoints in ``runs/``.
+    """
+    root = _project_root()
+    stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    out = os.path.join(root, cfg.RUNS_DIR, f"{stamp}_sim")
+    os.makedirs(out, exist_ok=True)
+    return out
+
+
+def _write_sim_repro_artifacts(out_dir: str, ckpt_path: str) -> None:
+    """Copy the loaded checkpoint and repo ``config.py`` into ``out_dir`` for reproducibility."""
+    dst_w = os.path.join(out_dir, cfg.CHECKPOINT_FILENAME)
+    try:
+        shutil.copy2(os.path.abspath(ckpt_path), dst_w)
+        print(f"Saved weights copy: {os.path.abspath(dst_w)!r}")
+    except OSError as exc:
+        print(
+            f"Warning: could not copy weights to {dst_w!r}: {exc}",
+            file=sys.stderr,
+        )
+    cfg_src = os.path.join(_project_root(), "config.py")
+    dst_c = os.path.join(out_dir, "config.py")
+    try:
+        shutil.copy2(cfg_src, dst_c)
+        print(f"Saved config copy: {os.path.abspath(dst_c)!r}")
+    except OSError as exc:
+        print(
+            f"Warning: could not copy config to {dst_c!r}: {exc}",
+            file=sys.stderr,
+        )
 
 
 def latest_checkpoint_path() -> str | None:
@@ -597,7 +637,7 @@ def _bev_realtime_frame(
 
     ``nav_exit_active`` / ``nav_exit_text`` control the optional upper-left instruction box (see
     ``SIM_TAKE_OFFRAMP_UPPER_HALF_NAV`` and ``SIM_NAV_EXIT_INSTRUCTION_TEXT`` in config).
-    When ``show_step_hud`` is false (e.g. ``SIM_BEV_VIDEO_ENABLE`` recording), step / pause hints are omitted.
+    When ``show_step_hud`` is false (saved BEV MP4), step / pause hints are omitted.
     """
     vis = world_bgr.copy()
     if len(path) >= 2:
@@ -1200,6 +1240,7 @@ def run_simulation() -> tuple[
     float,
     str | None,
     str | None,
+    str,
 ]:
     """
     Load the newest checkpoint and roll out: crop -> ``DrivingNet`` channel 0 -> ``psi`` via
@@ -1209,10 +1250,10 @@ def run_simulation() -> tuple[
     Stops early when ``SIM_STOP_WHEN_REACHES_MAP_TOP`` and ``y <= DATASET_MAP_MARGIN``, or at
     ``SIM_MAX_STEPS``.
 
-    When ``SIM_FP_VIDEO_ENABLE`` is true, writes each driver crop (plus a final pose frame when
-    available) to ``<simulation_output_dir>/<SIM_FP_VIDEO_FILENAME>`` at ``SIM_VIDEO_FPS``.
-    When ``SIM_BEV_VIDEO_ENABLE`` is true, writes one bird's-eye frame per step to
-    ``<simulation_output_dir>/<SIM_BEV_VIDEO_FILENAME>`` (same FPS).
+    Each call creates ``runs/<timestamp>_sim/`` (see :func:`simulation_run_output_dir`), copies the loaded
+    weights and repo ``config.py`` there (:func:`_write_sim_repro_artifacts`), and writes both
+    ``SIM_FP_VIDEO_FILENAME`` (each driver crop plus a final pose frame when available) and
+    ``SIM_BEV_VIDEO_FILENAME`` (one bird's-eye frame per step) at ``SIM_VIDEO_FPS``.
 
     **Off-ramps:** With projection and ``OFFRAMP_ENABLE``, the pose advances on the main spline until a
     branch row is crossed; it **merges** onto the corresponding Bézier only when ``take_offramp`` intent is
@@ -1222,7 +1263,8 @@ def run_simulation() -> tuple[
         ``world_bgr``, list of ``SimPathPoint`` (centerline ``x,y``, integrated ``psi``, ramp flag,
         ``u_ramp``), checkpoint path,
         ``px_per_m``, absolute path to the first-person MP4 if recorded (else ``None``),
-        and absolute path to the BEV MP4 if recorded (else ``None``).
+        absolute path to the BEV MP4 if recorded (else ``None``),
+        and absolute path to this run's output directory (``runs/..._sim/``).
     """
     ckpt = latest_checkpoint_path()
     if ckpt is None:
@@ -1264,17 +1306,13 @@ def run_simulation() -> tuple[
     )
     print(f"Weights: {os.path.abspath(ckpt)}")
 
-    out_dir = simulation_output_dir(ckpt)
-    fp_video_abs: str | None = None
+    out_dir = simulation_run_output_dir()
+    print(f"Simulation output directory: {os.path.abspath(out_dir)!r}")
+    _write_sim_repro_artifacts(out_dir, ckpt)
+    fp_video_abs: str | None = os.path.join(out_dir, cfg.SIM_FP_VIDEO_FILENAME)
     video_writer: cv2.VideoWriter | None = None
-    bev_video_abs: str | None = None
+    bev_video_abs: str | None = os.path.join(out_dir, cfg.SIM_BEV_VIDEO_FILENAME)
     bev_video_writer: cv2.VideoWriter | None = None
-    if cfg.SIM_FP_VIDEO_ENABLE or cfg.SIM_BEV_VIDEO_ENABLE:
-        os.makedirs(out_dir, exist_ok=True)
-    if cfg.SIM_FP_VIDEO_ENABLE:
-        fp_video_abs = os.path.join(out_dir, cfg.SIM_FP_VIDEO_FILENAME)
-    if cfg.SIM_BEV_VIDEO_ENABLE:
-        bev_video_abs = os.path.join(out_dir, cfg.SIM_BEV_VIDEO_FILENAME)
 
     path: list[SimPathPoint] = [_sim_path_point(x0, y0, psi)]
     x, y = x0, y0
@@ -1354,12 +1392,9 @@ def run_simulation() -> tuple[
         _prev_sigint = None
 
     try:
-        # When writing MP4s and using live windows, initialize OpenCV highgui before any
-        # VideoWriter so the GUI backend is ready first (avoids live display failing or Qt
-        # thread warnings on some Linux/OpenCV builds).
-        if (cfg.SIM_FP_VIDEO_ENABLE or cfg.SIM_BEV_VIDEO_ENABLE) and (
-            cfg.SIM_REALTIME_BEV or cfg.SIM_REALTIME_DRIVER_VIEW
-        ):
+        # When using live windows, initialize OpenCV highgui before any ``VideoWriter`` so the GUI
+        # backend is ready first (avoids live display failing or Qt thread warnings on some builds).
+        if cfg.SIM_REALTIME_BEV or cfg.SIM_REALTIME_DRIVER_VIEW:
             try:
                 cv2.startWindowThread()
             except Exception:
@@ -1892,27 +1927,28 @@ def run_simulation() -> tuple[
             video_writer.write(_fp_video_frame_bgr(view_end))
         video_writer.release()
         fp_video_abs = os.path.abspath(fp_video_abs) if fp_video_abs else None
-    elif cfg.SIM_FP_VIDEO_ENABLE and fp_video_abs is not None:
-        # Enabled but no frames (e.g. immediate warp failure).
+    else:
         fp_video_abs = None
 
     if bev_video_writer is not None:
         bev_video_writer.release()
         bev_video_abs = os.path.abspath(bev_video_abs) if bev_video_abs else None
-    elif cfg.SIM_BEV_VIDEO_ENABLE and bev_video_abs is not None:
+    else:
         bev_video_abs = None
 
     n_steps = len(path) - 1
     print(f"Simulation steps taken: {n_steps}")
 
-    return world, path, ckpt, px_per_m, fp_video_abs, bev_video_abs
+    return world, path, ckpt, px_per_m, fp_video_abs, bev_video_abs, os.path.abspath(
+        out_dir
+    )
 
 
 def main() -> None:
     """Run simulation, save BEV overlay, CSV, optional first-person and BEV MP4s, print stats, show figure."""
     n_train, n_test = count_train_test_examples()
     print(f"Dataset: {n_train} train examples, {n_test} test examples")
-    world_bgr, path, ckpt, px_per_m, fp_video, bev_video = run_simulation()
+    world_bgr, path, ckpt, px_per_m, fp_video, bev_video, sim_out_dir = run_simulation()
     path_arr = np.array([[p[0], p[1], p[2]] for p in path], dtype=np.float64)
 
     vis = world_bgr.copy()
@@ -2032,8 +2068,7 @@ def main() -> None:
             axis_bgr=(180, 220, 255),
         )
 
-    out_dir = simulation_output_dir(ckpt)
-    os.makedirs(out_dir, exist_ok=True)
+    out_dir = sim_out_dir
     out_png = os.path.join(out_dir, "sim_path.png")
     out_csv = os.path.join(out_dir, "ego_path.csv")
     n_tr_stat, n_pert, frac_pert = train_perturb_stats_from_labels()
