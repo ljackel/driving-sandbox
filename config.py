@@ -59,6 +59,8 @@ MODEL_USE_TRANSFORMER_HEAD = True
 EPOCHS = 20
 # Simulation: write first-person MP4 during roll-out.
 SIM_FP_VIDEO_ENABLE = True
+# Simulation: write bird's-eye MP4 (map resolution, trail + ego); see ``SIM_BEV_VIDEO_*`` below.
+SIM_BEV_VIDEO_ENABLE = False
 # World: draw a secondary off-ramp in the bottom half of the BEV; optional dataset labels + κ for it.
 OFFRAMP_ENABLE = True
 # Off-ramps: one **lane** wide on the map (half the main road´s paved width) and no centerline dashes.
@@ -418,8 +420,7 @@ SIM_BEV_EGO_CAR_MIN_DISPLAY_LEN_PX = 22.0
 SIM_START_MAX_INSET_PX = 200
 # First-person video from ``simulate.run_simulation`` (same resolution as ``CAMERA_IMAGE_SIZE``); gated by ``SIM_FP_VIDEO_ENABLE`` (switches above).
 SIM_FP_VIDEO_FILENAME = "sim_first_person.mp4"
-# Bird's-eye video: full map resolution (``WORLD_IMAGE_SIZE`` square), trail + ego icon + optional nav box; same FPS as first-person.
-SIM_BEV_VIDEO_ENABLE = True
+# Bird's-eye video: full map resolution (``WORLD_IMAGE_SIZE`` square), trail + ego icon + optional nav box; same FPS as first-person (gated by switch above).
 SIM_BEV_VIDEO_FILENAME = "sim_bev.mp4"
 # Playback speed matches one simulation step per frame (``1 / SIM_DT``).
 SIM_VIDEO_FPS = 1.0 / SIM_DT

@@ -40,7 +40,7 @@ Training benefits from a CUDA GPU; CPU works but is slower.
    python evaluate_test.py
    ```
 
-5. **Simulate** open-loop on the BEV map (loads latest checkpoint, can save `sim_path.png`, `ego_path.csv`, optional first-person MP4):
+5. **Simulate** open-loop on the BEV map (loads latest checkpoint, can save `sim_path.png`, `ego_path.csv`, optional first-person MP4 `sim_first_person.mp4`, optional BEV MP4 `sim_bev.mp4` via `SIM_BEV_VIDEO_ENABLE`):
 
    ```bash
    python simulate.py
@@ -97,7 +97,7 @@ Most scripts import **`config.py`** as `cfg`; change hyperparameters there rathe
 
 | File | Purpose |
 |------|---------|
-| **`simulate.py`** | Loads **latest checkpoint**, steps the policy on the map (main spline by arc length; **off-ramp Bézier** after a branch merge when intent allows), optional **real-time BEV/driver** windows, optional **MP4**; saves trajectory CSV and path overlay. Run: `python simulate.py`. |
+| **`simulate.py`** | Loads **latest checkpoint**, steps the policy on the map (main spline by arc length; **off-ramp Bézier** after a branch merge when intent allows), optional **real-time BEV/driver** windows, optional **first-person** and/or **bird's-eye** MP4 (`SIM_FP_VIDEO_*`, `SIM_BEV_VIDEO_*`); saves trajectory CSV and path overlay. Run: `python simulate.py`. |
 
 ### Utilities and scratch
 
@@ -142,5 +142,7 @@ If OpenCV GUI calls fail (e.g. over SSH), set in `config.py` before running:
 
 - `SIM_REALTIME_BEV = False`
 - `SIM_REALTIME_DRIVER_VIEW = False`
+
+You can still enable `SIM_FP_VIDEO_ENABLE` / `SIM_BEV_VIDEO_ENABLE` to record MP4s without windows.
 
 or run with a short one-off patch that sets those flags before importing `simulate`.
