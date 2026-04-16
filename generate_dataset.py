@@ -329,10 +329,14 @@ def _world_main_road_with_bot_and_lateral(
     """
     y_ref = float(map_size) - float(margin)
     w_bot, qx, qy, ppsi, _ = slow_bot_car_pass_blend_and_pose(
-        float(yf), dw, y_ref, right_lane_offset_px
+        float(yf),
+        dw,
+        y_ref,
+        right_lane_offset_px,
+        for_training_labels=True,
     )
     w_convoy = convoy_right_lane_pass_weight(
-        float(yf), dw, y_ref, float(dw.px_per_m)
+        float(yf), dw, y_ref, float(dw.px_per_m), for_training_labels=True
     )
     has_convoy_draw = convoy_right_lane_active()
     world_use = world
@@ -408,7 +412,7 @@ def generate_data(num_train=cfg.NUM_TRAIN_FRAMES, num_test=cfg.NUM_TEST_FRAMES):
     ``max(roadkill, pass)`` like an extra left-lane curriculum (κ still from centerline at ``y``).
 
     **Convoy:** when ``BOT_CONVOY_ENABLE``, extra right-lane traffic uses the same arc law as the slow bot
-    (``BOT_CONVOY_ARC_OFFSET_FROM_LEAD_PX``); labels merge pass weight with the lead bot via
+    (anchor + spacing or ``BOT_CONVOY_ARC_OFFSET_FROM_LEAD_PX``); labels merge pass weight via
     ``convoy_right_lane_pass_weight``.
 
     **Off-ramp:** when ``OFFRAMP_ENABLE`` and ``DATASET_OFFRAMP_LABELS_ENABLE``, also writes

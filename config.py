@@ -225,12 +225,21 @@ SIM_SLOW_BOT_Y_AT_ARC_ITER = 36
 SIM_SLOW_BOT_ARC_NEWTON_MAX = 10
 SIM_SLOW_BOT_ARC_NEWTON_TOL_PX = 0.25
 # **Convoy** (extra slow traffic in the **right lane**): same arc odometer as the lead slow bot
-# (``slow_bot_sigma_b_odom``: anchor or ``BOT_CAR_START_FRAC_FROM_BOTTOM``), with
-# fixed arc offsets (px) **behind** that lead. Pass / label blending uses the same raised-cosine as the
-# slow bot (left-lane pass), taking the max over convoy vehicles.
+# (``slow_bot_sigma_b_odom``). When ``BOT_CONVOY_ANCHOR_REAR_TO_FIRST_OFFRAMP``, fixed arc offsets vs the
+# lead are chosen so the **rearmost** car sits near the chosen branch when the lead matches
+# ``slow_bot_sigma_b_odom`` at ``y = size - DATASET_MAP_MARGIN - BOT_CONVOY_OFFSET_CALIB_BOTTOM_INSET_PX``;
+# convoy still uses ``sigma_k = sigma_lead(y_ego) + off_k`` so all cars move with the lead.
 BOT_CONVOY_ENABLE = True
-BOT_CONVOY_COUNT = 3
-# Arc (px) added to lead ``sigma_b``; negative = toward map bottom / behind the lead slow bot.
+BOT_CONVOY_COUNT = 6
+BOT_CONVOY_ANCHOR_REAR_TO_FIRST_OFFRAMP = True
+# ``offramp_branch_y_pxs()[0]`` = first exit met from the map bottom.
+BOT_CONVOY_REAR_OFFRAMP_INDEX = 0
+BOT_CONVOY_REAR_Y_OFFSET_PX_BELOW_BRANCH = 16.0
+# Main-road row for calibrating ``off_rear`` (larger inset = farther up from dataset bottom).
+BOT_CONVOY_OFFSET_CALIB_BOTTOM_INSET_PX = 0.0
+# Arc gap (px) between **adjacent** convoy cars along the centerline (~2× former 72 px default).
+BOT_CONVOY_ARC_SPACING_PX = 144.0
+# Legacy: only if ``BOT_CONVOY_ANCHOR_REAR_TO_FIRST_OFFRAMP`` is false.
 BOT_CONVOY_ARC_OFFSET_FROM_LEAD_PX = (-72.0, -144.0, -216.0)
 # When convoy is enabled (non-empty offsets), simulation step uses this speed (m/s) if not ``None``.
 BOT_CONVOY_EGO_SPEED_M_S = 28.0
@@ -284,6 +293,11 @@ PERSPECTIVE_SRC_MARGIN_PX = 12.0
 # --- Dataset generation ---
 # BEV ``y`` increases downward; geography split vs mix is ``DATASET_MIX_TRAIN_TEST_GEOGRAPHY`` (switches above).
 DATASET_MAP_MARGIN = 80
+# Main-road **training labels** only (``generate_dataset``): widen roadkill + slow-bot / convoy pass ramps by
+# ``max(1, DATASET_MIN_LANE_CHANGE_CAR_LENGTHS / DATASET_LANE_CHANGE_REF_CAR_LENGTHS)`` so supervised lateral
+# transitions are not shorter than MIN ego car lengths vs the REF baseline (simulation unchanged).
+DATASET_MIN_LANE_CHANGE_CAR_LENGTHS = 5.0
+DATASET_LANE_CHANGE_REF_CAR_LENGTHS = 2.5
 # Clean grid size per split; with aligned perturbations on, total files = 2 × this (half clean, half perturbed).
 NUM_TRAIN_FRAMES = 100
 NUM_TEST_FRAMES = 100
